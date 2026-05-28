@@ -1,6 +1,6 @@
 """
 Sound Control - Desktop companion for FabGL Sound Center
-Converts audio files and streams to ESP32 over WiFi (16-bit PCM).
+Converts audio files and streams to ESP32 over WiFi (8-bit PCM).
 Made by @UfkuAcik
 """
 import socket
@@ -202,11 +202,20 @@ class SoundControlApp(ctk.CTk):
     def _cycle_tempo(self, idx):
         var = self.ch_vars[idx]['tempo_var']
         btn = self.ch_vars[idx]['tempo_btn']
-        nv = (var.get() + 1) % 5
+        nv = (var.get() + 1) % 9
         var.set(nv)
-        t_names = ["T: OFF", "T: 0.5s", "T: 1s", "T: 2s", "T: 4s"]
+        t_names = ["T:OFF", "T:.5s", "T:1s", "T:2s", "T:4s", "T:1-2-1", "T:1-1-2", "T:.5-.5-1", "T:.5-1-.5"]
         btn.configure(text=t_names[nv])
         self._send_cmd(f"SET_CH_TEMPO:{idx}:{nv}")
+
+    def _toggle_sync(self, idx):
+        var = self.ch_vars[idx]['sync_var']
+        btn = self.ch_vars[idx]['sync_btn']
+        nv = 0 if var.get() else 1
+        var.set(nv)
+        t = THEMES[self.theme_name.get()]
+        btn.configure(fg_color=t["accent"] if nv else "#444444")
+        self._send_cmd(f"SET_CH_SYNC:{idx}:{nv}")
 
 
     def _switch_tab(self, tab_name):
@@ -299,7 +308,7 @@ class SoundControlApp(ctk.CTk):
             type_var = ctk.StringVar(value="Sine")
             types = ["Sine", "Square", "Triangle", "Sawtooth", "Noise", "Kick", "Snare", "HiHat", "Crash", "Tom", "Clap", "Cowbell", "Ride", "Woodblk", "Bongo", "Conga", "Tambor", "Shaker", "Laser", "Bell", "RimSh", "FlrTom", "Guiro", "Maracs", "808K", "808Cl", "Timbal", "Agogo", "TriHit", "FMBel", "Siren", "ZapDn", "Metal", "PwrK", "Buzz"]
             type_cb = ctk.CTkOptionMenu(self, variable=type_var, values=types, command=lambda val, idx=i: self._send_cmd(f"SET_CH_TYPE:{idx}:{types.index(val)}"))
-            self.remote_widgets.append((type_cb, {"relx": 0.38, "rely": base_y + 0.04, "relwidth": 0.15}))
+            self.remote_widgets.append((type_cb, {"relx": 0.38, "rely": base_y + 0.04, "relwidth": 0.19}))
             
             # Row 2: Frq Slider, Enable Button, Tempo Button
             frq_lbl = ctk.CTkLabel(self, text="Frq:", width=30)
@@ -309,13 +318,17 @@ class SoundControlApp(ctk.CTk):
             self.remote_widgets.append((freq_sl, {"relx": 0.06, "rely": base_y + 0.09, "relwidth": 0.25}))
             
             en_btn = ctk.CTkButton(self, text="Enable", fg_color="#2B7A0B", hover_color="#1E5C06", command=lambda idx=i: self._toggle_en(idx))
-            self.remote_widgets.append((en_btn, {"relx": 0.33, "rely": base_y + 0.09, "relwidth": 0.10}))
+            self.remote_widgets.append((en_btn, {"relx": 0.33, "rely": base_y + 0.09, "relwidth": 0.08}))
             
+            sync_var = ctk.IntVar(value=0)
+            sync_btn = ctk.CTkButton(self, text="Sync", fg_color="#444444", hover_color="#666666", command=lambda idx=i: self._toggle_sync(idx))
+            self.remote_widgets.append((sync_btn, {"relx": 0.42, "rely": base_y + 0.09, "relwidth": 0.06}))
+
             tempo_var = ctk.IntVar(value=0)
             tempo_btn = ctk.CTkButton(self, text="Tmp: OFF", fg_color="#444444", hover_color="#666666", command=lambda idx=i: self._cycle_tempo(idx))
-            self.remote_widgets.append((tempo_btn, {"relx": 0.44, "rely": base_y + 0.09, "relwidth": 0.09}))
+            self.remote_widgets.append((tempo_btn, {"relx": 0.49, "rely": base_y + 0.09, "relwidth": 0.08}))
             
-            self.ch_vars.append({'en': en_var, 'type': type_var, 'vol': vol_var, 'freq': freq_var, 'en_btn': en_btn, 'tempo_var': tempo_var, 'tempo_btn': tempo_btn})
+            self.ch_vars.append({'en': en_var, 'type': type_var, 'vol': vol_var, 'freq': freq_var, 'en_btn': en_btn, 'sync_var': sync_var, 'sync_btn': sync_btn, 'tempo_var': tempo_var, 'tempo_btn': tempo_btn})
 
         # RIGHT COLUMN: System (Aligned with Channel 1, Y ~ 0.22)
         base_s = 0.16
@@ -327,13 +340,19 @@ class SoundControlApp(ctk.CTk):
         s_theme_cb = ctk.CTkOptionMenu(self, variable=self.esp_theme_name, values=list(THEMES.keys()), command=self._set_esp_theme)
         self.remote_widgets.append((s_theme_cb, {"relx": 0.65, "rely": base_s + 0.05, "relwidth": 0.30}))
         
-        s_wifi_lbl = ctk.CTkLabel(self, text="WiFi:", anchor="w")
-        self.remote_widgets.append((s_wifi_lbl, {"relx": 0.58, "rely": base_s + 0.10}))
-        self.s_ip_lbl = ctk.CTkLabel(self, textvariable=self.display_ip, fg_color="#1f538d", corner_radius=4)
-        self.remote_widgets.append((self.s_ip_lbl, {"relx": 0.65, "rely": base_s + 0.10, "relwidth": 0.30}))
-        
         s_rst_btn = ctk.CTkButton(self, text="Reset", fg_color="#B22222", hover_color="#8B0000", command=self._confirm_reset)
-        self.remote_widgets.append((s_rst_btn, {"relx": 0.65, "rely": base_s + 0.15, "relwidth": 0.30}))
+        self.remote_widgets.append((s_rst_btn, {"relx": 0.65, "rely": base_s + 0.10, "relwidth": 0.30}))
+
+        s_wifi_lbl = ctk.CTkLabel(self, text="WiFi:", anchor="w")
+        self.remote_widgets.append((s_wifi_lbl, {"relx": 0.58, "rely": base_s + 0.15}))
+        self.s_ip_lbl = ctk.CTkLabel(self, textvariable=self.display_ip, fg_color="#1f538d", corner_radius=4)
+        self.remote_widgets.append((self.s_ip_lbl, {"relx": 0.65, "rely": base_s + 0.15, "relwidth": 0.30}))
+
+        s_time_lbl = ctk.CTkLabel(self, text="Time:", anchor="w")
+        self.remote_widgets.append((s_time_lbl, {"relx": 0.58, "rely": base_s + 0.20}))
+        self.s_time_val = ctk.StringVar(value="Wait NTP...")
+        self.s_time_disp = ctk.CTkLabel(self, textvariable=self.s_time_val, fg_color="#444444", corner_radius=4)
+        self.remote_widgets.append((self.s_time_disp, {"relx": 0.65, "rely": base_s + 0.20, "relwidth": 0.30}))
 
         # RIGHT COLUMN: Master (Aligned with Channel 3, Y ~ 0.48)
         base_m = 0.42
@@ -579,8 +598,14 @@ class SoundControlApp(ctk.CTk):
             idx = int(parts[2])
             nv = int(parts[3])
             self.ch_vars[idx]['tempo_var'].set(nv)
-            t_names = ["T: OFF", "T: 0.5s", "T: 1s", "T: 2s", "T: 4s"]
+            t_names = ["T:OFF", "T:.5s", "T:1s", "T:2s", "T:4s", "T:1-2-1", "T:1-1-2", "T:.5-.5-1", "T:.5-1-.5"]
             self.ch_vars[idx]['tempo_btn'].configure(text=t_names[nv])
+        elif parts[1] == "CH_SYNC":
+            idx = int(parts[2])
+            nv = int(parts[3])
+            self.ch_vars[idx]['sync_var'].set(nv)
+            t = THEMES[self.theme_name.get()]
+            self.ch_vars[idx]['sync_btn'].configure(fg_color=t["accent"] if nv else "#444444")
         elif parts[1].startswith("EQ_"):
             band = int(parts[1][3:])
             val = int(parts[2])
@@ -630,6 +655,8 @@ class SoundControlApp(ctk.CTk):
             self.fx_en_var2.set(int(parts[2]))
         elif parts[1] == "BOOST":
             self.booster_var.set(int(parts[2]))
+        elif parts[1] == "TIME":
+            self.s_time_val.set(line.split(":", 2)[2].strip())
 
     def _toggle_overdrive(self):
         self.od_en = 1 if self.od_en == 0 else 0
@@ -736,7 +763,10 @@ class SoundControlApp(ctk.CTk):
 
     def _convert_worker(self, files):
         total = len(files)
-        self._log(f"Starting bulk conversion ({total} files)...")
+        if total == 1:
+            self._log(f"Starting conversion ({os.path.basename(files[0])})...")
+        else:
+            self._log(f"Starting bulk conversion ({total} files)...")
         self.convert_btn.configure(state="disabled")
         
         startupinfo = None
@@ -767,7 +797,10 @@ class SoundControlApp(ctk.CTk):
                 self._log(f"Saved: {os.path.basename(out_name)}")
                 last_out_name = out_name
             
-            self._log(f"Bulk conversion complete! ({total} files)")
+            if total == 1:
+                self._log("Conversion complete!")
+            else:
+                self._log(f"Bulk conversion complete! ({total} files)")
             if last_out_name:
                 self.stream_file.set(last_out_name)
             

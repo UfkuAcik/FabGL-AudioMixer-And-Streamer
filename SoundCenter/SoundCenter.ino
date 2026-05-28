@@ -1,16 +1,16 @@
 /*
   ============================================================
-  FabGL Sound Mixer v2
+  FabGL Sound Mixer
   For OLIMEX ESP32-SBC-FabGL Board
   ============================================================
   Features:
-    - 4 mixer channels (Sine/Square/Triangle/Sawtooth/Noise + 15 Drum/Synths)
+    - 4 mixer channels (Sine/Square/Triangle/Sawtooth/Noise + 30 Drum/Synths)
     - SD card WAV player (8-bit mono, Resamples to 22050Hz)
-    - WiFi audio streaming receiver (16-bit PCM, TCP port 8266)
+    - WiFi audio streaming receiver (8-bit PCM, TCP port 8266)
     - 5 GUI themes (Classic Blue, Matrix, Amber Retro, Dark, Cyberpunk)
     - PS/2 keyboard and mouse control
     - VGA output at 400x300
-    - NEW: Pause/Resume, 19 DSP SFX, 5-Band EQ, VU Meter, Resamplers
+    - NEW: Pause/Resume, 31 DSP SFX, 5-Band EQ, VU Meter, Resamplers
 */
 
 #define private public
@@ -19,6 +19,8 @@
 #undef private
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <time.h>
+#include <dirent.h>
 #include <Preferences.h>
 #include <math.h>
 
@@ -33,7 +35,7 @@ using namespace fabgl;
 #define CONTROL_PORT 8267
 
 // ── Audio Config ─────────────────────────────────────────────
-#define WAV_BUF_SIZE   32768 // Increased buffer for 2x speed stability
+#define WAV_BUF_SIZE   8192 // 8KB buffer (~370ms latency) for snappy DSP response
 #define WAV_PLAY_FREQ  22050  // Enhanced sample rate (22050 Hz)
 
 // ── Globals ──────────────────────────────────────────────────
@@ -217,7 +219,7 @@ struct AppState {
   int eq[5];
   int fxType; int fxEn;
   int fxType2; int fxEn2;
-  int chEn[4]; int chVol[4]; int chFreq[4]; int chType[4]; int chTempo[4];
+  int chEn[4]; int chVol[4]; int chFreq[4]; int chType[4]; int chTempo[4]; int chSync[4];
   int           mediaSource;
   int           mediaState;
   int           mediaProg;
@@ -226,7 +228,7 @@ struct AppState {
   int           speed;
   int           agcEn;
 };
-volatile AppState g_state = { 127, 1, 1, {100,100,100,100,100}, 0, 0, 0, 0, {0,0,0,0}, {100,100,100,100}, {200,200,200,200}, {0,1,2,3}, {0,0,0,0}, 0, 0, 0, -1, 0, 100, 0 };
+volatile AppState g_state = { 127, 1, 1, {100,100,100,100,100}, 0, 0, 0, 0, {0,0,0,0}, {100,100,100,100}, {200,200,200,200}, {0,1,2,3}, {0,0,0,0}, {0,0,0,0}, 0, 0, 0, -1, 0, 100, 0 };
 static bool g_ui_update_req = false;
 
 class SystemFrame;
@@ -239,6 +241,8 @@ static float g_eqLowMid = 1.0f;
 static float g_eqMid = 1.0f;
 static float g_eqHighMid = 1.0f;
 static float g_eqHigh = 1.0f;
+static int   g_dspPipeline = 1;
+static bool  g_pianoActive[7] = {false};
 static int   g_fxType = 0; 
 static bool  g_fxEnable = false;
 static int   g_fxType2 = 0;
@@ -353,6 +357,25 @@ public:
   }
 };
 
+#define PROCESS_EQ(s_var) { \
+    if (g_eqLow != 1.0f || g_eqLowMid != 1.0f || g_eqMid != 1.0f || g_eqHighMid != 1.0f || g_eqHigh != 1.0f) { \
+        s_var = g_bqLow.process(s_var); \
+        s_var = g_bqLowMid.process(s_var); \
+        s_var = g_bqMid.process(s_var); \
+        s_var = g_bqHighMid.process(s_var); \
+        s_var = g_bqHigh.process(s_var); \
+    } \
+}
+
+#define PROCESS_OD(s_var) { \
+    if (g_overEnable) { \
+        s_var = s_var * 4.0f; \
+        if (s_var > 120.0f) s_var = 120.0f + (s_var - 120.0f) * 0.1f; \
+        else if (s_var < -80.0f) s_var = -80.0f + (s_var + 80.0f) * 0.1f; \
+        s_var = s_var / (1.0f + abs(s_var)/120.0f); \
+    } \
+}
+
 static void IRAM_ATTR applyDSP(int8_t* buffer, int len) {
     if (g_eqLow == 1.0f && g_eqLowMid == 1.0f && g_eqMid == 1.0f && g_eqHighMid == 1.0f && g_eqHigh == 1.0f && (!g_fxEnable || g_fxType == 0) && (!g_fxEnable2 || g_fxType2 == 0) && !g_overEnable) return;
     static unsigned int m_fxPhase = 0;
@@ -367,22 +390,11 @@ static void IRAM_ATTR applyDSP(int8_t* buffer, int len) {
     for (int i=0; i<len; i++) {
       float s = (float)buffer[i] + 1e-9f; // Anti-denormal noise
       
-      // --- 5-Band EQ (Biquad IIR) ---
-      if (g_eqLow != 1.0f || g_eqLowMid != 1.0f || g_eqMid != 1.0f || g_eqHighMid != 1.0f || g_eqHigh != 1.0f) {
-        s = g_bqLow.process(s);
-        s = g_bqLowMid.process(s);
-        s = g_bqMid.process(s);
-        s = g_bqHighMid.process(s);
-        s = g_bqHigh.process(s);
-      }
+      // --- DSP Routing - Pre SFX ---
+      if (g_dspPipeline == 1 || g_dspPipeline == 3 || g_dspPipeline == 4) PROCESS_EQ(s);
+      if (g_dspPipeline == 1 || g_dspPipeline == 2 || g_dspPipeline == 4) PROCESS_OD(s);
       
-      // --- Independent Overdrive ---
-      if (g_overEnable) {
-          s = s * 4.0f;
-          if (s > 120.0f) s = 120.0f + (s - 120.0f) * 0.1f;
-          else if (s < -80.0f) s = -80.0f + (s + 80.0f) * 0.1f;
-          s = s / (1.0f + abs(s)/120.0f);
-      }
+      float dry = s;
       
       // --- 20 Effects ---
       if (g_fxEnable && g_fxType > 0) {
@@ -410,8 +422,17 @@ static void IRAM_ATTR applyDSP(int8_t* buffer, int len) {
           s = wet;
         } else if (g_fxType == 2) { // Reverb (Freeverb Schroeder Topology)
           static float c1_lp=0, c2_lp=0, c3_lp=0, c4_lp=0;
-          static int16_t cb1[1557], cb2[1613], cb3[1493], cb4[1373];
-          static int16_t ap1[227], ap2[73];
+          static int16_t *cb1=nullptr, *cb2=nullptr, *cb3=nullptr, *cb4=nullptr;
+          static int16_t *ap1=nullptr, *ap2=nullptr;
+          if (!cb1) {
+            cb1 = (int16_t*)heap_caps_calloc(1557, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            cb2 = (int16_t*)heap_caps_calloc(1613, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            cb3 = (int16_t*)heap_caps_calloc(1493, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            cb4 = (int16_t*)heap_caps_calloc(1373, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            ap1 = (int16_t*)heap_caps_calloc(227, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            ap2 = (int16_t*)heap_caps_calloc(73, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            if (!cb1) { cb1=(int16_t*)calloc(1557,2); cb2=(int16_t*)calloc(1613,2); cb3=(int16_t*)calloc(1493,2); cb4=(int16_t*)calloc(1373,2); ap1=(int16_t*)calloc(227,2); ap2=(int16_t*)calloc(73,2); }
+          }
           static int p1=0, p2=0, p3=0, p4=0, pa1=0, pa2=0;
           
           float out_c1 = (float)cb1[p1];
@@ -671,6 +692,9 @@ static void IRAM_ATTR applyDSP(int8_t* buffer, int len) {
         }
       }
 
+      float out1 = s;
+      if (g_dspPipeline == 4) s = dry;
+
       // --- SFX Slot 2 (independent, uses g_fxBuf2/g_fxPtr2) ---
       if (g_fxEnable2 && g_fxType2 > 0) {
         static unsigned int m_fxPhase2 = 0;
@@ -803,6 +827,18 @@ static void IRAM_ATTR applyDSP(int8_t* buffer, int len) {
         }
       }
       
+      // --- DSP Routing - Post SFX ---
+      if (g_dspPipeline == 4) {
+          if ((g_fxEnable && g_fxType > 0) && (g_fxEnable2 && g_fxType2 > 0)) {
+              s = (out1 + s) * 0.5f;
+          } else if (g_fxEnable && g_fxType > 0) {
+              s = out1;
+          }
+      }
+      
+      if (g_dspPipeline == 3) PROCESS_OD(s);
+      if (g_dspPipeline == 2) PROCESS_EQ(s);
+
       // DC Blocker
       float dc_out = s - dc_in_prev + 0.995f * dc_out_prev;
       dc_in_prev = s;
@@ -952,16 +988,16 @@ static void wavPlayerTask(void*) {
   g_state.mediaState = 1;
   g_ui_update_req = true;
   
-  g_wavGen = new RingBufferGenerator(WAV_BUF_SIZE);
+  g_wavGen = new RingBufferGenerator(8192);
   g_boosterGen = new BoosterWrapper(g_wavGen);
   soundGenerator.attach(g_boosterGen); 
   g_wavGen->setVolume(g_wavVol); 
   g_wavGen->enable(true);
   g_boosterGen->enable(true);
   
-  int8_t* chunkBuf = (int8_t*)heap_caps_malloc(8192, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  int8_t* chunkBuf = (int8_t*)heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!chunkBuf) {
-    chunkBuf = (int8_t*)malloc(8192); // Fallback
+    chunkBuf = (int8_t*)malloc(2048); // Fallback
   }
   if (!chunkBuf) {
     if (g_boosterGen) { g_boosterGen->enable(false); soundGenerator.detach(g_boosterGen); delete g_boosterGen; g_boosterGen=nullptr; }
@@ -978,18 +1014,18 @@ static void wavPlayerTask(void*) {
        g_wavSeekPct = -1;
        g_wavGen->m_curVol = 0; // Anti-click: volume ramp will fade in
        g_wavGen->m_head = g_wavGen->m_tail = 0; // Flush buffer
-         wavConvertChunk(f, &hdr, chunkBuf, 8192, &rem, true);
+         wavConvertChunk(f, &hdr, chunkBuf, 2048, &rem, true);
     }
     if (g_wavPaused) {
        vTaskDelay(pdMS_TO_TICKS(50));
        continue;
     }
-    while (g_wavGen->availableForWrite() < 8192 && !g_wavStop && !g_wavPaused) {
+    while (g_wavGen->availableForWrite() < 2048 && !g_wavStop && !g_wavPaused) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (g_wavStop) break;
     
-    int n = wavConvertChunk(f, &hdr, chunkBuf, 8192, &rem, false);
+    int n = wavConvertChunk(f, &hdr, chunkBuf, 2048, &rem, false);
     if (n <= 0) break;
     
     applyDSP(chunkBuf, n);
@@ -1032,7 +1068,7 @@ static void wavPlay(const char* path) {
   if (g_wavGen) g_wavGen->enable(true);
   g_resampAcc = 1.0f; g_resampFilt = 0.0f; g_resampPrev = 0.0f;
   Serial.printf("[WAV] Creating wavPlayerTask... freeHeap=%d\n", ESP.getFreeHeap());
-  BaseType_t ret = xTaskCreatePinnedToCore(wavPlayerTask,"wavPlay",4096,nullptr,1,&g_wavTask,0);
+  BaseType_t ret = xTaskCreatePinnedToCore(wavPlayerTask,"wavPlay",4096,nullptr,1,&g_wavTask,1);
   Serial.printf("[WAV] wavPlayerTask create ret=%d (1=OK), handle=%p\n", ret, g_wavTask);
 }
 static void wavStopFn() { g_wavStop = true; }
@@ -1062,17 +1098,18 @@ static void wifiStreamTask(void*) {
         uint32_t srcRate = *(uint32_t*)(hdr+4);
         uint32_t bitsIn  = *(uint32_t*)(hdr+8);
         
-        g_streamGen = new RingBufferGenerator(WAV_BUF_SIZE);
+        g_streamGen = new RingBufferGenerator(8192);
         g_streamBooster = new BoosterWrapper(g_streamGen);
         soundGenerator.attach(g_streamBooster); 
         g_streamGen->setVolume(100); 
         g_streamGen->enable(true);
         g_streamBooster->enable(true);
         
-        int8_t* chunkBuf = (int8_t*)heap_caps_malloc(8192, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        int8_t* chunkBuf = (int8_t*)heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!chunkBuf) {
-          chunkBuf = (int8_t*)malloc(8192); // Fallback
+          chunkBuf = (int8_t*)malloc(2048); // Fallback
         }
+        uint8_t* tmpBuf = (uint8_t*)malloc(1024);
         float step = (float)srcRate / WAV_PLAY_FREQ;
         float s_acc = 0.0f;
         
@@ -1080,18 +1117,17 @@ static void wifiStreamTask(void*) {
           int avail = client.available();
           if (avail <= 0) { vTaskDelay(5); continue; }
           
-          while (g_streamGen->availableForWrite() < 8192 && g_streamActive && client.connected()) {
+          while (g_streamGen->availableForWrite() < 2048 && g_streamActive && client.connected()) {
              vTaskDelay(pdMS_TO_TICKS(5));
           }
           if (!g_streamActive || !client.connected()) break;
 
-          uint8_t tmpBuf[1024];
           int written = 0;
-          while (written < 8192 && client.connected()) {
+          while (written < 2048 && client.connected()) {
             int chunk = client.available();
             if (chunk <= 0) { vTaskDelay(2); continue; }
             if (chunk > (int)sizeof(tmpBuf)) chunk = sizeof(tmpBuf);
-            if (written + chunk > 8192) chunk = 8192 - written;
+            if (written + chunk > 2048) chunk = 2048 - written;
             int nr = client.read(tmpBuf, chunk);
             
             // Push resampler for stream rate matching
@@ -1102,12 +1138,12 @@ static void wifiStreamTask(void*) {
                else samp = (int8_t)(tmpBuf[i] - 128);
                
                s_acc += 1.0f;
-               while (s_acc >= step && written < 8192) {
+               while (s_acc >= step && written < 2048) {
                   chunkBuf[written++] = samp;
                   s_acc -= step;
                }
             }
-            if (written >= 4096) break;
+            if (written >= 2048) break;
           }
           if (written > 0) {
             applyDSP(chunkBuf, written);
@@ -1115,6 +1151,7 @@ static void wifiStreamTask(void*) {
           }
         }
         
+        if (tmpBuf) free(tmpBuf);
         if (chunkBuf) free(chunkBuf);
         if (g_streamGen) { 
           if (g_streamBooster) { g_streamBooster->enable(false); soundGenerator.detach(g_streamBooster); delete g_streamBooster; g_streamBooster=nullptr; }
@@ -1245,7 +1282,7 @@ class DrumGenerator : public fabgl::WaveformGenerator {
          m_env = m_env - (m_env >> 11) - 1; // ~100ms
       }
       else if (m_type == 17) { // Shaker
-         out = noise / 2;
+         out = noise / 3;
          m_env = m_env - (m_env >> 10) - 1; // ~50ms
       }
       else if (m_type == 18) { // Laser Zap
@@ -1379,8 +1416,12 @@ class ChannelFrame : public uiFrame {
       uiButton* m_tempoBtn;
       int m_id;
       int m_tempoState = 0;
+      int m_autoOffTicks = 0;
       bool m_seqToggle = false;
-      uint32_t m_lastTempoTrigger = 0;
+      bool m_syncEnabled = false;
+      uiButton* m_syncBtn;
+      uint32_t m_seqStartTime = 0;
+      int m_lastTriggerStep = -1;
       
       ChannelFrame(uiWindow* p, int ch)
         : uiFrame(p, "", Point(2, 2 + ch*52), Size(292, 54)), m_id(ch) {
@@ -1388,13 +1429,12 @@ class ChannelFrame : public uiFrame {
       frameProps().hasMaximizeButton=false; frameProps().hasMinimizeButton=false;
       frameProps().moveable=false;
       frameStyle().titleFont = &fabgl::FONT_std_12;
-      const char* titles[] = {"Signal Generation Channel 1", "Signal Generation Channel 2", "Signal Generation Channel 3", "Signal Generation Channel 4"};
-      setTitle(titles[ch]);
+      setTitleFmt("Signal Generation Channel %d", ch+1);
       applyThemeToFrame(this, THEMES[g_themeIdx]);
   
       m_volLbl = new uiLabel(this, "Vol: 100", Point(4,17));
       m_volSl = new uiSlider(this, Point(57,17), Size(113,14), uiOrientation::Horizontal);
-      m_volSl->onChange = [&](){ m_volLbl->setTextFmt("Vol:%3d", m_volSl->position());
+      m_volSl->onChange = [&](){ m_volLbl->setTextFmt("Vol:%3d",m_volSl->position());
         if(m_cur) m_cur->setVolume(m_volSl->position()); g_state.chVol[m_id] = m_volSl->position(); };
       m_volSl->setup(0,127,16); m_volSl->setPosition(100);
   
@@ -1422,47 +1462,82 @@ class ChannelFrame : public uiFrame {
       m_typeCB->items().append("Metal"); m_typeCB->items().append("PwrK");
       m_typeCB->items().append("Buzz");
       m_typeCB->selectItem(ch%5);
-      m_typeCB->onChange = [&](){ Serial.printf("[GEN] SetGen %d\n", m_typeCB->selectedItem()); setGen(m_typeCB->selectedItem()); g_state.chType[m_id] = m_typeCB->selectedItem(); };
+      m_typeCB->onChange = [&](){ setGen(m_typeCB->selectedItem()); g_state.chType[m_id] = m_typeCB->selectedItem(); };
   
       m_freqLbl = new uiLabel(this, "Frq:200", Point(4,34));
       m_freqSl = new uiSlider(this, Point(57,34), Size(113,14), uiOrientation::Horizontal);
       m_freqSl->onChange = [&](){ 
-        m_freqLbl->setTextFmt("Frq:%d", m_freqSl->position());
+        if(m_typeCB->selectedItem() >= 5) {
+           if(m_freqSl->position() != 20) m_freqSl->setPosition(20);
+        }
+        m_freqLbl->setTextFmt("Frq:%d",m_freqSl->position());
         if(m_cur && m_typeCB->selectedItem() < 5) m_cur->setFrequency(m_freqSl->position()); g_state.chFreq[m_id] = m_freqSl->position(); 
       };
       m_freqSl->setup(20,8000,500); m_freqSl->setPosition(150+ch*80);
       
-      m_enBtn = new uiButton(this, "Enable", Point(175,34), Size(50, 14));
+      m_enBtn = new uiButton(this, "EN", Point(175,34), Size(28, 14));
       m_enBtn->onClick = [&](){
          if (!m_cur) return;
          bool nv = !m_cur->enabled();
          m_cur->enable(nv);
          if (nv && m_typeCB->selectedItem() >= 5) {
              m_drum.trigger();
+             if (m_tempoState == 0) m_autoOffTicks = 15; // 1500ms auto-off (for long cymbals)
+         } else {
+             m_autoOffTicks = 0;
          }
-         m_enBtn->setText(nv ? "Disable" : "Enable"); g_state.chEn[m_id] = (nv?1:0);
+         m_enBtn->buttonStyle().backgroundColor = nv ? THEMES[g_themeIdx].accent : C_WHITE;
+         m_enBtn->buttonStyle().textColor = nv ? C_WHITE : C_BLACK;
+         m_enBtn->setText(nv ? "DIS" : "EN"); g_state.chEn[m_id] = (nv?1:0);
       };
       
-      m_tempoBtn = new uiButton(this, "Tmp: OFF", Point(228,34), Size(60, 14));
+      m_syncBtn = new uiButton(this, "Sync", Point(205,34), Size(26, 14));
+      m_syncBtn->buttonStyle().textColor = C_BLACK;
+      m_syncBtn->buttonStyle().backgroundColor = C_WHITE;
+      m_syncBtn->onClick = [&]() {
+         m_syncEnabled = !m_syncEnabled;
+         g_state.chSync[m_id] = m_syncEnabled ? 1 : 0;
+         m_syncBtn->buttonStyle().backgroundColor = m_syncEnabled ? THEMES[g_themeIdx].accent : C_WHITE;
+         m_seqStartTime = millis(); // Reset phase on sync change
+         m_lastTriggerStep = -1;
+      };
+      
+      m_tempoBtn = new uiButton(this, "T:OFF", Point(233,34), Size(55, 14));
       m_tempoBtn->onClick = [&](){
-         setTempo((m_tempoState + 1) % 5);
+         setTempo((m_tempoState + 1) % 9);
       };
       
       setGen(ch%5);
     }
     
     void setTempo(int val) {
-       m_tempoState = val % 5; g_state.chTempo[m_id] = m_tempoState;
-       const char* tNames[] = {"Tmp: OFF", "Tmp: 0.5s", "Tmp: 1s", "Tmp: 2s", "Tmp: 4s"};
+       m_tempoState = val % 9; g_state.chTempo[m_id] = m_tempoState;
+       const char* tNames[] = {"T:OFF", "T:.5s", "T:1s", "T:2s", "T:4s", "T:1-2-1", "T:1-1-2", "T:.5-.5-1", "T:.5-1-.5"};
        m_tempoBtn->setText(tNames[m_tempoState]);
        if (m_tempoState == 0) {
-          if (m_cur) m_cur->setVolume(m_volSl->position());
+          if (m_cur) {
+             m_cur->setVolume(m_volSl->position());
+             if (m_typeCB->selectedItem() >= 5 && m_cur->enabled()) {
+                 m_cur->enable(false);
+                 g_state.chEn[m_id] = 0;
+                 if (m_enBtn) {
+                     m_enBtn->setText("EN");
+                     m_enBtn->buttonStyle().backgroundColor = C_WHITE;
+                     m_enBtn->buttonStyle().textColor = C_BLACK;
+                 }
+                 g_ui_update_req = true;
+             }
+          }
        }
     }
     
     void setGen(int i) {
-      Serial.printf("[GEN] Init Gen %d\n", i);
-      if(m_cur){ m_cur->enable(false); soundGenerator.detach(m_cur); }
+      bool wasEnabled = false;
+      if(m_cur){ 
+          wasEnabled = m_cur->enabled();
+          m_cur->enable(false); 
+          soundGenerator.detach(m_cur); 
+      }
       if (i >= 5) {
          m_drum.setType(i);
          m_cur = &m_drum;
@@ -1477,8 +1552,18 @@ class ChannelFrame : public uiFrame {
       soundGenerator.attach(m_cur);
       m_cur->setVolume(m_volSl->position());
       if (i < 5) m_cur->setFrequency(m_freqSl->position());
-      m_cur->enable(false); // Default disabled
-      if (m_enBtn) m_enBtn->setText("Enable");
+      
+      m_cur->enable(wasEnabled);
+      if (wasEnabled && i >= 5 && m_tempoState == 0) {
+          m_drum.trigger();
+          m_autoOffTicks = 15;
+      }
+      
+      if (m_enBtn) {
+         m_enBtn->buttonStyle().backgroundColor = wasEnabled ? THEMES[g_themeIdx].accent : C_WHITE;
+         m_enBtn->buttonStyle().textColor = wasEnabled ? C_WHITE : C_BLACK;
+         m_enBtn->setText(wasEnabled ? "DIS" : "EN");
+      }
     }
 };
 class MasterFrame : public uiFrame {
@@ -1507,7 +1592,8 @@ class MasterFrame : public uiFrame {
       m_enBtn->onClick = [=]() {
           g_masterEnable = !g_masterEnable; g_state.masterEn = g_masterEnable;
           m_enBtn->setText(g_masterEnable ? "EN" : "DIS");
-          soundGenerator.play(g_masterEnable);
+          if (!g_masterEnable) soundGenerator.setVolume(0);
+          else soundGenerator.setVolume(g_masterVol);
           parent()->repaint();
       };
       
@@ -1532,15 +1618,26 @@ class MasterFrame : public uiFrame {
 
   class SystemFrame : public uiFrame {
   public:
+    uiComboBox* m_themeCB;
+    uiButton* m_rb;
+    uiLabel* m_timeLbl;
+    uiTimerHandle m_tmr;
+
     void processEvent(fabgl::uiEvent * event) override {
         fabgl::uiFrame::processEvent(event);
         if (event->id == fabgl::UIEVT_MOUSEBUTTONDOWN || event->id == fabgl::UIEVT_SETFOCUS) {
             if (g_title) WindowHack::moveTop(this->app()->rootWindow(), g_title);
             if (m_sig) WindowHack::moveTop(this->app()->rootWindow(), m_sig);
         }
+        if (event->id == fabgl::UIEVT_TIMER) {
+            struct tm timeinfo;
+            if (getLocalTime(&timeinfo, 0)) {
+                char tbuf[32];
+                strftime(tbuf, sizeof(tbuf), "%d.%m.%y %H:%M:%S", &timeinfo);
+                if (m_timeLbl) m_timeLbl->setText(tbuf);
+            }
+        }
     }
-    uiComboBox* m_themeCB;
-    uiButton* m_rb;
 
     SystemFrame(uiWindow* p)
       : uiFrame(p, "System", Point(292, 2), Size(102, 100)) {
@@ -1558,16 +1655,8 @@ class MasterFrame : public uiFrame {
       for (int i=0; i<THEME_COUNT; i++) m_themeCB->items().append(THEMES[i].name);
       m_themeCB->selectItem(0);
 
-      // Row 2: WiFi
-      new uiStaticLabel(this, "WiFi:", Point(4, 54));
-      auto wl = new uiLabel(this, "Off", Point(32, 54));
-      if (g_wifiReady) {
-        wl->setText(WiFi.localIP().toString().c_str());
-        wl->labelStyle().textColor = C_BRIGHTGREEN;
-      }
-
-      // Row 3: Reset
-      m_rb = new uiButton(this, "Reset", Point(4, 70), Size(90, 16));
+      // Row 2: Reset
+      m_rb = new uiButton(this, "Reset", Point(4, 50), Size(90, 16));
       m_rb->onClick = [=](){
         auto cf = new uiFrame(app()->rootWindow(), "Reset", Point(120, 100), Size(160, 80));
         applyThemeToFrame(cf, THEMES[g_themeIdx]);
@@ -1584,12 +1673,27 @@ class MasterFrame : public uiFrame {
         nb->onClick = [cf](){ cf->app()->showWindow(cf, false); };
         cf->app()->setFocusedWindow(yb);
       };
+
+      // Row 3: WiFi
+      new uiStaticLabel(this, "WiFi:", Point(4, 68));
+      auto wl = new uiLabel(this, "Off", Point(32, 68));
+      if (g_wifiReady) {
+        wl->setTextFmt("%s", WiFi.localIP().toString().c_str());
+        wl->labelStyle().textColor = C_BRIGHTGREEN;
+      }
+      
+      // Row 4: Time
+      m_timeLbl = new uiLabel(this, "Wait NTP...", Point(4, 82));
+      m_tmr = app()->setTimer(this, 1000);
     }
   };
 
 // ══════════════════════════════════════════════════════════════
 //  SDPlayerFrame
 // ══════════════════════════════════════════════════════════════
+// ==============================================================================
+//  SDPlayerFrame
+// ==============================================================================
   class SDPlayerFrame : public uiFrame {
   public:
     uiFileBrowser* m_fb; uiLabel* m_st; uiSlider* m_pb; uiTimerHandle m_tmr;
@@ -1610,8 +1714,15 @@ class MasterFrame : public uiFrame {
       frameProps().moveable=false;
       applyThemeToFrame(this, THEMES[g_themeIdx]);
   
-      m_fb = new uiFileBrowser(this,Point(4,16),Size(64,48)); 
-      m_fb->setDirectory("/SD/SONGS");
+      m_fb = new uiFileBrowser(this,Point(4,16),Size(64,48));
+      
+      DIR* testDir = opendir("/SD/SONGS");
+      if (testDir) {
+          m_fb->setDirectory("/SD/SONGS");
+          closedir(testDir);
+      } else {
+          m_fb->setDirectory("/SD");
+      }
   
       m_playBtn = new uiButton(this,"Ply",Point(72,16),Size(30,16));
       m_playBtn->onClick = [=]() { if(g_state.mediaSource==0) onPlay(); else g_state.mediaState=1; };
@@ -1631,10 +1742,11 @@ class MasterFrame : public uiFrame {
          g_ui_update_req = true;
       };
 
-      m_agcBtn = new uiButton(this, "Fix", Point(196,16), Size(20,16));
+      m_agcBtn = new uiButton(this, "Fix", Point(196,16), Size(24,16));
       m_agcBtn->onClick = [=]() {
          g_agcEnable = !g_agcEnable;
          g_state.agcEn = g_agcEnable; g_ui_update_req = true;
+         m_agcBtn->setText(g_agcEnable ? "Fxd" : "Fix");
          m_agcBtn->buttonStyle().backgroundColor = g_agcEnable ? RGB888(255, 128, 0) : THEMES[g_themeIdx].btnBg;
          parent()->repaint();
       };
@@ -1729,8 +1841,8 @@ class MasterFrame : public uiFrame {
          
          g_state.speed = (int)(g_playbackSpeed * 100); g_ui_update_req = true;
          char buf[16];
-         if (g_state.speed == 100 || g_state.speed == 0) strcpy(buf, "Spd:1x");
-         else sprintf(buf, "S:%d%%", g_state.speed);
+         if (g_playbackSpeed == 1.0f) strcpy(buf, "Spd:1x");
+         else sprintf(buf, "S:%.2f", g_playbackSpeed);
          m_speedBtn->setText(buf);
       };
   
@@ -1739,27 +1851,36 @@ class MasterFrame : public uiFrame {
       m_eqLowSl = new uiSlider(this, Point(eq_x, 16), Size(12, 40), uiOrientation::Vertical);
       m_eqLowSl->setup(0, 200, 100); m_eqLowSl->setPosition(100);
       m_eqLowSl->onChange = [=]() { g_eqLow = m_eqLowSl->position() / 100.0f; g_state.eq[0] = m_eqLowSl->position(); updateEQ(); };
-      new uiStaticLabel(this, "L", Point(eq_x+1, 58));
   
       m_eqLowMidSl = new uiSlider(this, Point(eq_x+18, 16), Size(12, 40), uiOrientation::Vertical);
       m_eqLowMidSl->setup(0, 200, 100); m_eqLowMidSl->setPosition(100);
       m_eqLowMidSl->onChange = [=]() { g_eqLowMid = m_eqLowMidSl->position() / 100.0f; g_state.eq[1] = m_eqLowMidSl->position(); updateEQ(); };
-      new uiStaticLabel(this, "LM", Point(eq_x+16, 58));
   
       m_eqMidSl = new uiSlider(this, Point(eq_x+38, 16), Size(12, 40), uiOrientation::Vertical);
       m_eqMidSl->setup(0, 200, 100); m_eqMidSl->setPosition(100);
       m_eqMidSl->onChange = [=]() { g_eqMid = m_eqMidSl->position() / 100.0f; g_state.eq[2] = m_eqMidSl->position(); updateEQ(); };
-      new uiStaticLabel(this, "M", Point(eq_x+39, 58));
   
       m_eqHighMidSl = new uiSlider(this, Point(eq_x+58, 16), Size(12, 40), uiOrientation::Vertical);
       m_eqHighMidSl->setup(0, 200, 100); m_eqHighMidSl->setPosition(100);
       m_eqHighMidSl->onChange = [=]() { g_eqHighMid = m_eqHighMidSl->position() / 100.0f; g_state.eq[3] = m_eqHighMidSl->position(); updateEQ(); };
-      new uiStaticLabel(this, "HM", Point(eq_x+56, 58));
   
       m_eqHighSl = new uiSlider(this, Point(eq_x+78, 16), Size(12, 40), uiOrientation::Vertical);
       m_eqHighSl->setup(0, 200, 100); m_eqHighSl->setPosition(100);
       m_eqHighSl->onChange = [=]() { g_eqHigh = m_eqHighSl->position() / 100.0f; g_state.eq[4] = m_eqHighSl->position(); updateEQ(); };
-      new uiStaticLabel(this, "H", Point(eq_x+79, 58));
+      
+      // Draw all labels using custom UI component
+      auto eqLbls = new uiPaintBox(this, Point(eq_x, 58), Size(90, 14));
+      eqLbls->onPaint = [=](Rect const & r) {
+          app()->canvas()->setBrushColor(THEMES[g_themeIdx].bg);
+          app()->canvas()->fillRectangle(r);
+          app()->canvas()->setPenColor(C_WHITE);
+          app()->canvas()->setGlyphOptions(GlyphOptions().FillBackground(false));
+          app()->canvas()->drawText(&fabgl::FONT_std_12, r.X1 + 1, r.Y1, "L");
+          app()->canvas()->drawText(&fabgl::FONT_std_12, r.X1 + 16, r.Y1, "LM");
+          app()->canvas()->drawText(&fabgl::FONT_std_12, r.X1 + 39, r.Y1, "M");
+          app()->canvas()->drawText(&fabgl::FONT_std_12, r.X1 + 56, r.Y1, "HM");
+          app()->canvas()->drawText(&fabgl::FONT_std_12, r.X1 + 79, r.Y1, "H");
+      };
       
       // Apply theme colors to EQ sliders
       m_eqLowSl->sliderStyle().gripColor = THEMES[g_themeIdx].accent;
@@ -1792,7 +1913,8 @@ class MasterFrame : public uiFrame {
                   g_masterFrame->m_vs->setPosition(g_state.masterVol);
                   if (g_masterEnable != g_state.masterEn) {
                       g_masterEnable = g_state.masterEn;
-                      soundGenerator.play(g_masterEnable);
+                      if (!g_masterEnable) soundGenerator.setVolume(0);
+                      else soundGenerator.setVolume(g_masterVol);
                   }
                   g_masterVol = g_state.masterVol;
                }
@@ -1801,12 +1923,20 @@ class MasterFrame : public uiFrame {
                        g_chFrames[i]->m_volSl->setPosition(g_state.chVol[i]);
                        g_chFrames[i]->m_freqSl->setPosition(g_state.chFreq[i]);
                        g_chFrames[i]->m_typeCB->selectItem(g_state.chType[i]);
-                       g_chFrames[i]->m_enBtn->setText(g_state.chEn[i] ? "Disable" : "Enable");
+                       g_chFrames[i]->m_enBtn->setText(g_state.chEn[i] ? "DIS" : "EN");
+                       g_chFrames[i]->m_enBtn->buttonStyle().backgroundColor = g_state.chEn[i] ? THEMES[g_themeIdx].accent : C_WHITE;
+                       g_chFrames[i]->m_enBtn->buttonStyle().textColor = g_state.chEn[i] ? C_WHITE : C_BLACK;
                        g_chFrames[i]->setTempo(g_state.chTempo[i]);
+                       if (g_chFrames[i]->m_syncEnabled != (g_state.chSync[i] == 1)) {
+                           g_chFrames[i]->m_syncEnabled = (g_state.chSync[i] == 1);
+                           g_chFrames[i]->m_syncBtn->buttonStyle().backgroundColor = g_chFrames[i]->m_syncEnabled ? THEMES[g_themeIdx].accent : C_WHITE;
+                           g_chFrames[i]->m_seqStartTime = millis();
+                           g_chFrames[i]->m_lastTriggerStep = -1;
+                       }
                        if (g_chFrames[i]->m_cur) {
                            g_chFrames[i]->m_cur->enable(g_state.chEn[i]);
                            g_chFrames[i]->m_cur->setVolume(g_state.chVol[i]);
-                           if (g_state.chType[i] < 5) g_chFrames[i]->m_cur->setFrequency(g_state.chFreq[i]);
+                           if (g_state.chType[i] < 5) g_chFrames[i]->m_cur->setFrequency(g_chFrames[i]->m_freqSl->position());
                        }
                    }
                }
@@ -1830,8 +1960,8 @@ class MasterFrame : public uiFrame {
                g_playbackSpeed = g_state.speed / 100.0f;
                if (m_speedBtn) {
                    char buf[16];
-                   if (g_state.speed == 100 || g_state.speed == 0) strcpy(buf, "Spd:1x");
-                   else sprintf(buf, "S:%d%%", g_state.speed);
+                   if (g_playbackSpeed == 1.0f) strcpy(buf, "Spd:1x");
+                   else sprintf(buf, "S:%.2f", g_playbackSpeed);
                    m_speedBtn->setText(buf);
                }
                
@@ -1847,7 +1977,10 @@ class MasterFrame : public uiFrame {
                }
                g_playbackSpeed = g_state.speed / 100.0f;
                g_agcEnable = g_state.agcEn;
-               if (m_agcBtn) m_agcBtn->buttonStyle().backgroundColor = g_agcEnable ? RGB888(255, 128, 0) : THEMES[g_themeIdx].btnBg;
+               if (m_agcBtn) {
+                   m_agcBtn->setText(g_agcEnable ? "Fxd" : "Fix");
+                   m_agcBtn->buttonStyle().backgroundColor = g_agcEnable ? RGB888(255, 128, 0) : THEMES[g_themeIdx].btnBg;
+               }
                
                // No need to call repaint() for sliders, but uiButton setText requires a repaint to update visuals!
                parent()->repaint();
@@ -1859,6 +1992,9 @@ class MasterFrame : public uiFrame {
                }
                if (g_streamActive && g_streamGen && g_state.mediaState == 1) {
                   total_rms += (g_streamGen->m_rms * g_boostVal);
+               }
+               for (int i=0; i<7; i++) {
+                   if (g_pianoActive[i]) total_rms += 16;
                }
                for (int i=0; i<4; i++) {
                    if (g_chFrames[i] && g_chFrames[i]->m_cur && g_chFrames[i]->m_cur->enabled()) {
@@ -1985,6 +2121,7 @@ static void wifiControlTask(void*) {
                 else if (sscanf(line.c_str(), "SET_CH_TYPE:%d:%d", &ch, &val) == 2 && ch >= 0 && ch < 4) { g_state.chType[ch] = val; g_ui_update_req = true; }
                 else if (sscanf(line.c_str(), "SET_CH_EN:%d:%d", &ch, &val) == 2 && ch >= 0 && ch < 4) { g_state.chEn[ch] = val; g_ui_update_req = true; }
                 else if (sscanf(line.c_str(), "SET_CH_TEMPO:%d:%d", &ch, &val) == 2 && ch >= 0 && ch < 4) { g_state.chTempo[ch] = val; g_ui_update_req = true; }
+                else if (sscanf(line.c_str(), "SET_CH_SYNC:%d:%d", &ch, &val) == 2 && ch >= 0 && ch < 4) { g_state.chSync[ch] = val; g_ui_update_req = true; }
                 else if (sscanf(line.c_str(), "SET_MASTER_VOL:%d", &val) == 1) { g_state.masterVol = val; g_ui_update_req = true; }
                 else if (sscanf(line.c_str(), "SET_MASTER_EN:%d", &val) == 1) { g_state.masterEn = val; g_ui_update_req = true; }
                 else if (sscanf(line.c_str(), "SET_BOOST:%d", &val) == 1) { g_state.boost = val; g_ui_update_req = true; }
@@ -2062,6 +2199,17 @@ static void wifiControlTask(void*) {
                if (g_state.chType[i] != last_state.chType[i]) { client.printf("TEL:CH_TYPE:%d:%d\n", i, g_state.chType[i]); last_state.chType[i] = g_state.chType[i]; }
                if (g_state.chEn[i] != last_state.chEn[i]) { client.printf("TEL:CH_EN:%d:%d\n", i, g_state.chEn[i]); last_state.chEn[i] = g_state.chEn[i]; }
                if (g_state.chTempo[i] != last_state.chTempo[i]) { client.printf("TEL:CH_TEMPO:%d:%d\n", i, g_state.chTempo[i]); last_state.chTempo[i] = g_state.chTempo[i]; }
+               if (g_state.chSync[i] != last_state.chSync[i]) { client.printf("TEL:CH_SYNC:%d:%d\n", i, g_state.chSync[i]); last_state.chSync[i] = g_state.chSync[i]; }
+           }
+           static uint32_t last_time_telemetry = 0;
+           if (millis() - last_time_telemetry > 1000) {
+               last_time_telemetry = millis();
+               struct tm timeinfo;
+               if (getLocalTime(&timeinfo, 0)) {
+                   char tbuf[32];
+                   strftime(tbuf, sizeof(tbuf), "%d.%m.%y %H:%M:%S", &timeinfo);
+                   client.printf("TEL:TIME:%s\n", tbuf);
+               }
            }
            client.printf("TEL:VU:%d\n", g_vuPct);
         }
@@ -2077,47 +2225,24 @@ static void wifiControlTask(void*) {
 // ══════════════════════════════════════════════════════════════
 //  SoundMixerApp
 // ══════════════════════════════════════════════════════════════
-const int PIANO_FREQS[7] = {261, 293, 329, 349, 392, 440, 494};
-const char* PIANO_LABELS[7] = {"Z", "X", "C", "V", "B", "N", "M"};
-const VirtualKey PIANO_VKS[7] = {VK_z, VK_x, VK_c, VK_v, VK_b, VK_n, VK_m};
-
 class SoundMixerApp : public uiApp {
+public:
   ChannelFrame* m_ch[4];
   MasterFrame*  m_master;
   SystemFrame*  m_sys;
   SDPlayerFrame* m_sd;
 
-  fabgl::SineWaveformGenerator* m_pianoSine[7];
-  fabgl::SawtoothWaveformGenerator* m_pianoSaw[7];
-  uiLabel* m_pianoKeys[7] = {nullptr};
-  bool m_pianoActive[7] = {false};
+  fabgl::SineWaveformGenerator m_pianoSine[7];
+  fabgl::SawtoothWaveformGenerator m_pianoSaw[7];
+  uiButton* m_pianoKeys[7] = {nullptr};
+  uiLabel* m_mixLbl = nullptr;
+  uiButton* m_presetBtn[4] = {nullptr};
+  const int PIANO_FREQS[7] = {261, 293, 329, 349, 392, 440, 494};
+  const char* PIANO_LABELS[7] = {"Z", "X", "C", "V", "B", "N", "M"};
+  const VirtualKey PIANO_VKS[7] = {VK_z, VK_x, VK_c, VK_v, VK_b, VK_n, VK_m};
 
   void processEvent(uiEvent* ev) override {
-    if (ev->id == UIEVT_KEYDOWN || ev->id == UIEVT_KEYUP) {
-       for (int i = 0; i < 7; i++) {
-          if (ev->params.key.VK == PIANO_VKS[i]) {
-             bool isDown = (ev->id == UIEVT_KEYDOWN);
-             if (m_pianoActive[i] != isDown) {
-                m_pianoActive[i] = isDown;
-                if (isDown) {
-                   soundGenerator.attach(m_pianoSine[i]);
-                   soundGenerator.attach(m_pianoSaw[i]);
-                   m_pianoSine[i]->enable(true);
-                   m_pianoSaw[i]->enable(true);
-                   if (m_pianoKeys[i]) m_pianoKeys[i]->labelStyle().backgroundColor = THEMES[g_themeIdx].accent;
-                } else {
-                   m_pianoSine[i]->enable(false);
-                   m_pianoSaw[i]->enable(false);
-                   soundGenerator.detach(m_pianoSine[i]);
-                   soundGenerator.detach(m_pianoSaw[i]);
-                   if (m_pianoKeys[i]) m_pianoKeys[i]->labelStyle().backgroundColor = C_WHITE;
-                }
-             }
-             return; // Handled piano key, do not process further
-          }
-       }
-    }
-    
+
     if (ev->id == UIEVT_KEYDOWN) {
       if (ev->params.key.VK == VK_RETURN) {
         ev->params.key.VK = VK_SPACE;
@@ -2158,16 +2283,66 @@ class SoundMixerApp : public uiApp {
     g_sdFrame = m_sd;
     
     g_title = new uiLabel(rootWindow(), "Sound Center", Point(155, 4));
-    m_sig = new uiLabel(rootWindow(), "made w/ <3 by @UfkuAcik", Point(2, 282), Size(200, 15));
+    m_sig = new uiLabel(rootWindow(), "made w/ <3 by @UfkuAcik", Point(2, 284), Size(135, 15));
     if (m_sig) {
         WindowHack::moveTop(rootWindow(), m_sig);
     }
 
-    // Initialize Polyphonic Organ UI
+    // Initialize Polyphonic Organ
     for (int i = 0; i < 7; i++) {
-       m_pianoKeys[i] = new uiLabel(rootWindow(), PIANO_LABELS[i], Point(210 + i * 22, 282), Size(20, 15));
-       m_pianoKeys[i]->labelStyle().textColor = C_BLACK;
-       m_pianoKeys[i]->labelStyle().backgroundColor = C_WHITE;
+       // Workaround for FabGL #421: DivByZero panic if frequency is set before attach
+       m_pianoSine[i].setSampleRate(44100);
+       m_pianoSine[i].setFrequency(PIANO_FREQS[i]);
+       m_pianoSine[i].setVolume(45); // Main body
+       m_pianoSine[i].enable(false);
+       
+       m_pianoSaw[i].setSampleRate(44100);
+       m_pianoSaw[i].setFrequency(PIANO_FREQS[i]);
+       m_pianoSaw[i].setVolume(12); // Harmonics
+       m_pianoSaw[i].enable(false);
+       
+       m_pianoKeys[i] = new uiButton(rootWindow(), PIANO_LABELS[i], Point(138 + i * 18, 282), Size(18, 15));
+       m_pianoKeys[i]->buttonStyle().textColor = C_BLACK;
+       m_pianoKeys[i]->buttonStyle().backgroundColor = C_WHITE;
+       m_pianoKeys[i]->onMouseDown = [=](uiMouseEventInfo const& info) {
+           if (!g_pianoActive[i]) {
+               g_pianoActive[i] = true;
+               soundGenerator.attach(&m_pianoSine[i]);
+               soundGenerator.attach(&m_pianoSaw[i]);
+               m_pianoSine[i].enable(true);
+               m_pianoSaw[i].enable(true);
+               m_pianoKeys[i]->buttonStyle().backgroundColor = THEMES[g_themeIdx].accent;
+           }
+       };
+       m_pianoKeys[i]->onMouseUp = [=](uiMouseEventInfo const& info) {
+           if (g_pianoActive[i]) {
+               g_pianoActive[i] = false;
+               m_pianoSine[i].enable(false);
+               m_pianoSaw[i].enable(false);
+               soundGenerator.detach(&m_pianoSine[i]);
+               soundGenerator.detach(&m_pianoSaw[i]);
+               m_pianoKeys[i]->buttonStyle().backgroundColor = C_WHITE;
+           }
+       };
+    }
+
+    m_mixLbl = new uiLabel(rootWindow(), "Mix Preset:", Point(270, 284), Size(58, 15));
+    if (m_mixLbl) {
+        WindowHack::moveTop(rootWindow(), m_mixLbl);
+    }
+    
+    for (int i=0; i<4; i++) {
+        char buf[2]; sprintf(buf, "%d", i+1);
+        m_presetBtn[i] = new uiButton(rootWindow(), buf, Point(332 + i * 15, 284), Size(15, 15));
+        m_presetBtn[i]->buttonStyle().textColor = C_BLACK;
+        m_presetBtn[i]->buttonStyle().backgroundColor = (g_dspPipeline == i+1) ? THEMES[g_themeIdx].accent : C_WHITE;
+        m_presetBtn[i]->onClick = [=]() {
+           g_dspPipeline = i + 1;
+           for (int j=0; j<4; j++) {
+              m_presetBtn[j]->buttonStyle().backgroundColor = (g_dspPipeline == j+1) ? THEMES[g_themeIdx].accent : C_WHITE;
+              m_presetBtn[j]->repaint();
+           }
+        };
     }
 
     m_sys->m_themeCB->onChange = [&]() {
@@ -2231,6 +2406,10 @@ class SoundMixerApp : public uiApp {
          m_sig->labelStyle().textColor = t.accent;
          m_sig->labelStyle().backgroundColor = t.bg;
       }
+      if (m_mixLbl) {
+         m_mixLbl->labelStyle().textColor = t.accent;
+         m_mixLbl->labelStyle().backgroundColor = t.bg;
+      }
       m_sd->m_fb->listBoxStyle().selectedBackgroundColor = t.accent;
       m_sd->m_fb->listBoxStyle().focusedSelectedBackgroundColor = t.accent;
       m_sd->m_fb->windowStyle().focusedBorderColor = t.accent;
@@ -2247,27 +2426,19 @@ class SoundMixerApp : public uiApp {
       m_sd->m_stopBtn->buttonStyle().mouseDownBackgroundColor = t.accent;
       m_sd->m_pauseBtn->buttonStyle().mouseDownBackgroundColor = t.accent;
       
+      for (int i=0; i<4; i++) {
+         if (m_presetBtn[i]) {
+            m_presetBtn[i]->buttonStyle().backgroundColor = (g_dspPipeline == i+1) ? t.accent : C_WHITE;
+         }
+      }
+
       rootWindow()->repaint();
     };
 
     m_sys->m_themeCB->selectItem(g_themeIdx);
     m_sys->m_themeCB->onChange();
 
-    // Set frequencies (sampleRate is already 22050 because we never stopped soundGenerator in setup)
-    for (int i = 0; i < 7; i++) {
-       m_pianoSine[i] = new fabgl::SineWaveformGenerator();
-       m_pianoSaw[i] = new fabgl::SawtoothWaveformGenerator();
-       
-       m_pianoSine[i]->setSampleRate(WAV_PLAY_FREQ);
-       m_pianoSine[i]->setFrequency(PIANO_FREQS[i]);
-       m_pianoSine[i]->setVolume(45); // Main body
-       m_pianoSine[i]->enable(false);
-       
-       m_pianoSaw[i]->setSampleRate(WAV_PLAY_FREQ);
-       m_pianoSaw[i]->setFrequency(PIANO_FREQS[i]);
-       m_pianoSaw[i]->setVolume(12); // Harmonics
-       m_pianoSaw[i]->enable(false);
-    }
+    soundGenerator.play(true);
   }
 } app;
 
@@ -2275,17 +2446,60 @@ class SoundMixerApp : public uiApp {
 //  setup() / loop()
 // ══════════════════════════════════════════════════════════════
 
+struct TempoSeq { int total_ms; int num_triggers; int triggers[4]; };
+const TempoSeq TEMPO_SEQS[] = {
+    {0, 0, {}}, // OFF (0)
+    {1000, 2, {0, 500}}, // .5s (1) - Defined as 2 steps over 1s so the sequence wraps correctly
+    {2000, 2, {0, 1000}}, // 1s (2) - Defined as 2 steps over 2s
+    {4000, 2, {0, 2000}}, // 2s (3) - Defined as 2 steps over 4s
+    {8000, 2, {0, 4000}}, // 4s (4) - Defined as 2 steps over 8s
+    {4000, 3, {0, 1000, 3000}}, // 1-2-1: (wait 1s, wait 2s, wait 1s) (5)
+    {4000, 3, {0, 1000, 2000}}, // 1-1-2: (wait 1s, wait 1s, wait 2s) (6)
+    {2000, 3, {0, 500, 1000}}, // .5-.5-1: (wait 0.5, wait 0.5, wait 1) (7)
+    {2000, 3, {0, 500, 1500}}, // .5-1-.5: (wait 0.5, wait 1, wait 0.5) (8)
+};
+
 static void tempoTask(void*) {
    while (true) {
-      vTaskDelay(pdMS_TO_TICKS(100));
+      vTaskDelay(pdMS_TO_TICKS(100)); // 100ms resolution tick
       uint32_t now = millis();
       for (int i=0; i<4; i++) {
-         if (g_chFrames[i] && g_chFrames[i]->m_tempoState > 0) {
-            if (g_chFrames[i]->m_cur && g_chFrames[i]->m_cur->enabled()) {
+         if (g_chFrames[i]) {
+            if (g_chFrames[i]->m_autoOffTicks > 0) {
+               g_chFrames[i]->m_autoOffTicks--;
+               if (g_chFrames[i]->m_autoOffTicks == 0) {
+                   g_state.chEn[i] = 0;
+                   if (g_chFrames[i]->m_cur) g_chFrames[i]->m_cur->enable(false);
+                   g_ui_update_req = true;
+               }
+            }
+            if (g_chFrames[i]->m_tempoState > 0) {
+               if (g_chFrames[i]->m_cur && g_chFrames[i]->m_cur->enabled()) {
                int state = g_chFrames[i]->m_tempoState;
-               int ms = state == 1 ? 500 : (state == 2 ? 1000 : (state == 3 ? 2000 : 4000));
-               if (now - g_chFrames[i]->m_lastTempoTrigger >= ms) {
-                  g_chFrames[i]->m_lastTempoTrigger = now;
+               if (state > 8) state = 0;
+               const TempoSeq* seq = &TEMPO_SEQS[state];
+               
+               uint32_t phase = 0;
+               if (g_chFrames[i]->m_syncEnabled) {
+                  phase = now % seq->total_ms; // Aligned to global grid
+               } else {
+                  phase = (now - g_chFrames[i]->m_seqStartTime) % seq->total_ms; // Aligned to self start
+               }
+               
+               int current_step = -1;
+               for (int j = 0; j < seq->num_triggers; j++) {
+                  if (phase >= seq->triggers[j]) {
+                      current_step = j;
+                  }
+               }
+               
+               bool shouldTrigger = false;
+               if (current_step != -1 && current_step != g_chFrames[i]->m_lastTriggerStep) {
+                   g_chFrames[i]->m_lastTriggerStep = current_step;
+                   shouldTrigger = true;
+               }
+               
+               if (shouldTrigger) {
                   if (g_chFrames[i]->m_typeCB->selectedItem() >= 5) {
                      g_chFrames[i]->m_drum.trigger();
                   } else {
@@ -2296,11 +2510,11 @@ static void tempoTask(void*) {
                   }
                }
             }
+          }
          }
       }
    }
 }
-
 
 void setup() {
   Serial.begin(115200); delay(500);
@@ -2317,6 +2531,49 @@ void setup() {
   prefs.begin("SndMixer", false);
 
   kbdController.begin(PS2Preset::KeyboardPort0_MousePort1, KbdMode::GenerateVirtualKeys);
+  kbdController.keyboard()->onVirtualKey = [&](VirtualKey* p_vk, bool down) {
+     VirtualKey vk = *p_vk;
+     for (int i=0; i<7; i++) {
+        if (vk == app.PIANO_VKS[i]) {
+            if (g_pianoActive[i] != down) {
+                g_pianoActive[i] = down;
+                if (down) {
+                    soundGenerator.attach(&app.m_pianoSine[i]);
+                    soundGenerator.attach(&app.m_pianoSaw[i]);
+                    app.m_pianoSine[i].enable(true);
+                    app.m_pianoSaw[i].enable(true);
+                    if (app.m_pianoKeys[i]) app.m_pianoKeys[i]->buttonStyle().backgroundColor = THEMES[g_themeIdx].accent;
+                } else {
+                    app.m_pianoSine[i].enable(false);
+                    app.m_pianoSaw[i].enable(false);
+                    soundGenerator.detach(&app.m_pianoSine[i]);
+                    soundGenerator.detach(&app.m_pianoSaw[i]);
+                    if (app.m_pianoKeys[i]) app.m_pianoKeys[i]->buttonStyle().backgroundColor = C_WHITE;
+                }
+                g_ui_update_req = true;
+            }
+            return;
+        }
+     }
+     
+     if (down) {
+         int new_pl = -1;
+         if (vk == VK_1 || vk == VK_KP_1 || vk == VK_KP_END) new_pl = 1;
+         else if (vk == VK_2 || vk == VK_KP_2 || vk == VK_KP_DOWN) new_pl = 2;
+         else if (vk == VK_3 || vk == VK_KP_3 || vk == VK_KP_PAGEDOWN) new_pl = 3;
+         else if (vk == VK_4 || vk == VK_KP_4 || vk == VK_KP_LEFT) new_pl = 4;
+         
+         if (new_pl != -1) {
+             g_dspPipeline = new_pl;
+             for (int j=0; j<4; j++) {
+                 if (app.m_presetBtn[j]) {
+                     app.m_presetBtn[j]->buttonStyle().backgroundColor = (g_dspPipeline == j+1) ? THEMES[g_themeIdx].accent : C_WHITE;
+                     app.m_presetBtn[j]->repaint();
+                 }
+             }
+         }
+     }
+  };
   DisplayController.begin();
   DisplayController.setResolution(VGA_400x300_60Hz);
 
@@ -2326,22 +2583,24 @@ void setup() {
   cv.waitCompletion();
 
   fabgl::FileBrowser::mountSDCard(true, "/SD", 4, SD_CS, SD_MISO, SD_MOSI, SD_CLK);
+  
+
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   for (int i=0; i<20 && WiFi.status()!=WL_CONNECTED; i++) { delay(500); }
   if (WiFi.status() == WL_CONNECTED) {
     g_wifiReady = true;
-    xTaskCreatePinnedToCore(wifiStreamTask,"wifiStream",5120,nullptr,1,&g_streamTask,0); // Core 0 (PRO) for network
-    xTaskCreatePinnedToCore(wifiControlTask,"wifiCtrl",4096,nullptr,1,nullptr,0); // Core 0 (PRO) for network
+    configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    xTaskCreatePinnedToCore(wifiStreamTask,"wifiStream",2048,nullptr,1,&g_streamTask,0); 
+    xTaskCreatePinnedToCore(wifiControlTask,"wifiCtrl",2560,nullptr,1,nullptr,0);
   } else {
-    esp_wifi_start(); 
+    Serial.println("WiFi connection failed!");
   }
-
 }
 
 void loop() {
-  app.runAsync(&DisplayController, 8192).joinAsyncRun();
+  app.run(&DisplayController);
 }
 
 

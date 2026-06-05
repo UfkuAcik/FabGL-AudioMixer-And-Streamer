@@ -894,6 +894,7 @@ static float g_resampPrev = 0.0f;
 
 static WiFiServer*          g_tcpServer    = nullptr;
 static volatile bool        g_streamActive = false;
+static volatile int         g_wifiSeekReq = -1;
 static volatile bool        g_wifiReady    = false;
 static TaskHandle_t         g_streamTask   = nullptr;
 static RingBufferGenerator* g_streamGen    = nullptr;
@@ -1502,7 +1503,7 @@ class ChannelFrame : public uiFrame {
          m_lastTriggerStep = -1;
       };
       
-      m_tempoBtn = new uiButton(this, "T:OFF", Point(233,34), Size(55, 14));
+      m_tempoBtn = new uiButton(this, "Tmp:OFF", Point(233,34), Size(55, 14));
       m_tempoBtn->onClick = [&](){
          setTempo((m_tempoState + 1) % 9);
       };
@@ -1512,7 +1513,7 @@ class ChannelFrame : public uiFrame {
     
     void setTempo(int val) {
        m_tempoState = val % 9; g_state.chTempo[m_id] = m_tempoState;
-       const char* tNames[] = {"T:OFF", "T:.5s", "T:1s", "T:2s", "T:4s", "T:1-2-1", "T:1-1-2", "T:.5-.5-1", "T:.5-1-.5"};
+       const char* tNames[] = {"Tmp:OFF", "Tmp:.5s", "Tmp:1s", "Tmp:2s", "Tmp:4s", "Tmp:1-2-1", "Tmp:1-1-2", "Tmp:.5-.5-1", "Tmp:.5-1-.5"};
        m_tempoBtn->setText(tNames[m_tempoState]);
        if (m_tempoState == 0) {
           if (m_cur) {
@@ -1724,13 +1725,13 @@ class MasterFrame : public uiFrame {
           m_fb->setDirectory("/SD");
       }
   
-      m_playBtn = new uiButton(this,"Ply",Point(72,16),Size(30,16));
+      m_playBtn = new uiButton(this,"Play",Point(72,16),Size(30,16));
       m_playBtn->onClick = [=]() { if(g_state.mediaSource==0) onPlay(); else g_state.mediaState=1; };
       
-      m_pauseBtn = new uiButton(this,"Pau",Point(104,16),Size(32,16));
+      m_pauseBtn = new uiButton(this,"Pause",Point(104,16),Size(32,16));
       m_pauseBtn->onClick = [=]() { if(g_state.mediaSource==0) wavPauseFn(); else g_state.mediaState=(g_state.mediaState==1?2:1); };
   
-      m_stopBtn = new uiButton(this,"Stp",Point(138,16),Size(30,16));
+      m_stopBtn = new uiButton(this,"Stop",Point(138,16),Size(30,16));
       m_stopBtn->onClick = [=]() { if(g_state.mediaSource==0) wavStopFn(); else g_state.mediaState=0; };
   
       
@@ -1747,7 +1748,7 @@ class MasterFrame : public uiFrame {
          g_agcEnable = !g_agcEnable;
          g_state.agcEn = g_agcEnable; g_ui_update_req = true;
          m_agcBtn->setText(g_agcEnable ? "Fxd" : "Fix");
-         m_agcBtn->buttonStyle().backgroundColor = g_agcEnable ? RGB888(255, 128, 0) : THEMES[g_themeIdx].btnBg;
+         m_agcBtn->buttonStyle().backgroundColor = THEMES[g_themeIdx].btnBg;
          parent()->repaint();
       };
 
@@ -1765,7 +1766,7 @@ class MasterFrame : public uiFrame {
          g_overEnable = !g_overEnable;
          g_state.overEn = g_overEnable; g_ui_update_req = true;
          m_overBtn->setText(g_overEnable ? "OD:ON" : "OD:OFF");
-         m_overBtn->buttonStyle().backgroundColor = g_overEnable ? RGB888(255, 128, 0) : THEMES[g_themeIdx].btnBg;
+         m_overBtn->buttonStyle().backgroundColor = THEMES[g_themeIdx].btnBg;
          parent()->repaint();
       };
       
@@ -1779,12 +1780,15 @@ class MasterFrame : public uiFrame {
       m_pb->sliderStyle().slideColor = C_DARKGRAY;
       m_pb->onChange = [=]() {
          if (g_state.mediaSource == 1) {
-         // Send MEDIA_SEEK over telemetry, handled by Python
-         g_state.mediaProg = m_pb->position();
-      }
-      else if (g_wavPlaying && !g_wavStop && abs(m_pb->position() - g_wavProgress) > 1) {
-             g_wavSeekPct = m_pb->position();
-             g_wavProgress = g_wavSeekPct;
+            int newPos = m_pb->position();
+            if (abs(newPos - g_state.mediaProg) > 1) {
+               g_state.mediaProg = newPos;
+               g_wifiSeekReq = newPos;
+            }
+         }
+         else if (g_wavPlaying && !g_wavStop && abs(m_pb->position() - g_wavProgress) > 1) {
+            g_wavSeekPct = m_pb->position();
+            g_wavProgress = g_wavSeekPct;
          }
       };
       
@@ -1955,7 +1959,7 @@ class MasterFrame : public uiFrame {
                g_overEnable = g_state.overEn; 
                if (m_overBtn) {
                    m_overBtn->setText(g_overEnable ? "OD:ON" : "OD:OFF");
-                   m_overBtn->buttonStyle().backgroundColor = g_overEnable ? RGB888(255, 128, 0) : THEMES[g_themeIdx].btnBg;
+                   m_overBtn->buttonStyle().backgroundColor = THEMES[g_themeIdx].btnBg;
                }
                g_playbackSpeed = g_state.speed / 100.0f;
                if (m_speedBtn) {
@@ -1979,7 +1983,7 @@ class MasterFrame : public uiFrame {
                g_agcEnable = g_state.agcEn;
                if (m_agcBtn) {
                    m_agcBtn->setText(g_agcEnable ? "Fxd" : "Fix");
-                   m_agcBtn->buttonStyle().backgroundColor = g_agcEnable ? RGB888(255, 128, 0) : THEMES[g_themeIdx].btnBg;
+                   m_agcBtn->buttonStyle().backgroundColor = THEMES[g_themeIdx].btnBg;
                }
                
                // No need to call repaint() for sliders, but uiButton setText requires a repaint to update visuals!
@@ -2025,10 +2029,10 @@ class MasterFrame : public uiFrame {
               char pctBuf[8]; sprintf(pctBuf, "%d%%", g_wavProgress);
               m_timePct->setText(pctBuf);
               m_playBtn->setText("Play");
-              m_pauseBtn->setText(g_wavPaused ? "Resume" : "Pause");
+              m_pauseBtn->setText(g_wavPaused ? "Res" : "Pause");
               m_st->setText(g_wavPaused ? "Paused" : "Playing..."); 
               m_st->labelStyle().textColor = THEMES[g_themeIdx].accent;
-            } else {
+            } else if (!g_streamActive) {
               m_st->setText(g_wavProgress>=100?"Done":"Ready");
               m_st->labelStyle().textColor = g_wavProgress>=100 ? RGB888(0,128,255) : THEMES[g_themeIdx].text;
               m_pb->setPosition(g_wavProgress);
@@ -2047,7 +2051,16 @@ class MasterFrame : public uiFrame {
             }
             m_wasPlaying = g_wavPlaying;
       
-            if (g_streamActive) { m_st->setText("Streaming..."); m_st->labelStyle().textColor=THEMES[g_themeIdx].accent; }
+            if (g_streamActive) { 
+                m_st->setText(g_state.mediaState == 2 ? "Paused" : "Streaming..."); 
+                m_st->labelStyle().textColor=THEMES[g_themeIdx].accent; 
+                m_pb->setPosition(g_state.mediaProg);
+                char pctBuf[8]; sprintf(pctBuf, "%d%%", g_state.mediaProg);
+                m_timePct->setText(pctBuf);
+                m_playBtn->setText("Play");
+                m_pauseBtn->setText(g_state.mediaState == 2 ? "Res" : "Pause");
+                m_timePct->update();
+            }
             m_st->update();
         }
         uiFrame::processEvent(ev);
@@ -2152,6 +2165,7 @@ static void wifiControlTask(void*) {
                     }
                     g_ui_update_req = true; 
                 }
+                else if (sscanf(line.c_str(), "SET_PROG:%d", &val) == 1) { g_state.mediaProg = val; last_state.mediaProg = val; }
             } else if (line == "RESET") {
                 ESP.restart();
             } else if (line == "MEDIA_PLAY") {
@@ -2169,7 +2183,7 @@ static void wifiControlTask(void*) {
                     if (g_state.mediaSource == 0) {
                         g_wavSeekPct = pct; g_wavProgress = pct; g_state.mediaProg = pct; g_ui_update_req = true;
                     } else {
-                        g_state.mediaProg = pct; g_ui_update_req = true; // Tell Python to seek
+                        g_state.mediaProg = pct; g_ui_update_req = true;
                     }
                 }
             }
@@ -2178,6 +2192,8 @@ static void wifiControlTask(void*) {
         static uint32_t lastTel = 0;
         if (millis() - lastTel > 50) {
            lastTel = millis();
+           if (g_state.mediaSource == 0) g_state.mediaProg = g_wavProgress;
+           if (g_wifiSeekReq >= 0) { client.printf("TEL:SEEK:%d\n", g_wifiSeekReq); g_wifiSeekReq = -1; }
            if (g_state.masterVol != last_state.masterVol) { client.printf("TEL:M_VOL:%d\n", g_state.masterVol); last_state.masterVol = g_state.masterVol; }
            if (g_state.masterEn != last_state.masterEn) { client.printf("TEL:M_EN:%d\n", g_state.masterEn); last_state.masterEn = g_state.masterEn; }
            if (g_state.boost != last_state.boost) { client.printf("TEL:BOOST:%d\n", g_state.boost); last_state.boost = g_state.boost; }

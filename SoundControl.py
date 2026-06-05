@@ -141,6 +141,7 @@ class SoundControlApp(ctk.CTk):
         self.ctrl_connected = False
         self.vu_level = ctk.DoubleVar(value=0)
         self.prog_level = ctk.DoubleVar(value=0)
+        self._prog_updating = False
 
         self.media_state = 0
         self.seek_req = -1
@@ -160,12 +161,12 @@ class SoundControlApp(ctk.CTk):
         ctk.CTkLabel(header, text="ESP32 IP:").pack(side="left", padx=(30, 5))
         self.ip_entry = ctk.CTkEntry(header, textvariable=self.esp_ip, width=120, font=("Consolas", 12))
         self.ip_entry.pack(side="left")
-        self.ctrl_btn = ctk.CTkButton(header, text="Connect Control", command=self._toggle_control, width=120)
+        self.ctrl_btn = ctk.CTkButton(header, anchor="center", text="Connect Control", command=self._toggle_control, width=120)
         self.ctrl_btn.pack(side="left", padx=10)
         self.ctrl_status = ctk.CTkLabel(header, text="Disconnected", text_color="red")
         self.ctrl_status.pack(side="left", padx=(0, 20))
 
-        self.theme_menu = ctk.CTkOptionMenu(header, variable=self.theme_name, values=list(THEMES.keys()), command=self._apply_theme, width=250)
+        self.theme_menu = ctk.CTkOptionMenu(header, anchor="center", variable=self.theme_name, values=list(THEMES.keys()), command=self._apply_theme, width=250)
         self.theme_menu.pack(side="right")
         ctk.CTkLabel(header, text="Theme:", font=ctk.CTkFont(size=14)).pack(side="right", padx=10)
 
@@ -173,10 +174,10 @@ class SoundControlApp(ctk.CTk):
         self.tab_buttons_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.tab_buttons_frame.pack(pady=(15, 0))
         
-        self.btn_tab_stream = ctk.CTkButton(self.tab_buttons_frame, text="Audio Conversion & Streaming", command=lambda: self._switch_tab("stream"))
+        self.btn_tab_stream = ctk.CTkButton(self.tab_buttons_frame, anchor="center", text="Audio Conversion & Streaming", command=lambda: self._switch_tab("stream"))
         self.btn_tab_stream.pack(side="left", padx=5)
         
-        self.btn_tab_remote = ctk.CTkButton(self.tab_buttons_frame, text="Remote Control", command=lambda: self._switch_tab("remote"))
+        self.btn_tab_remote = ctk.CTkButton(self.tab_buttons_frame, anchor="center", text="Remote Control", command=lambda: self._switch_tab("remote"))
         self.btn_tab_remote.pack(side="left", padx=5)
 
         self.stream_widgets = []
@@ -196,7 +197,7 @@ class SoundControlApp(ctk.CTk):
         btn = self.ch_vars[idx]['en_btn']
         nv = 0 if var.get() else 1
         var.set(nv)
-        btn.configure(text="Disable" if nv else "Enable", fg_color="#B22222" if nv else "#2B7A0B", hover_color="#8B0000" if nv else "#1E5C06")
+        btn.configure(text="DIS" if nv else "EN")
         self._send_cmd(f"SET_CH_EN:{idx}:{nv}")
 
     def _cycle_tempo(self, idx):
@@ -214,7 +215,7 @@ class SoundControlApp(ctk.CTk):
         nv = 0 if var.get() else 1
         var.set(nv)
         t = THEMES[self.theme_name.get()]
-        btn.configure(fg_color=t["accent"] if nv else "#444444")
+        btn.configure(text="Synced" if nv else "Sync", fg_color=t["accent"] if nv else "#444444")
         self._send_cmd(f"SET_CH_SYNC:{idx}:{nv}")
 
 
@@ -250,12 +251,12 @@ class SoundControlApp(ctk.CTk):
         self.stream_widgets.append((fr1, {"fill": "x", "padx": 30, "pady": 5}))
         self.file_entry = ctk.CTkEntry(fr1, textvariable=self.src_file, placeholder_text="Select an audio file...", font=("Consolas", 12))
         self.file_entry.pack(side="left", fill="x", expand=True)
-        self.browse_btn = ctk.CTkButton(fr1, text="Browse", width=80, command=self._browse)
+        self.browse_btn = ctk.CTkButton(fr1, anchor="center", text="Browse", width=80, command=self._browse)
         self.browse_btn.pack(side="left", padx=(10, 0))
         
         fr2 = ctk.CTkFrame(self, fg_color="transparent")
         self.stream_widgets.append((fr2, {"fill": "x", "padx": 30, "pady": 5}))
-        self.convert_btn = ctk.CTkButton(fr2, text="Convert to SD WAV (8-bit Mono)", command=self._convert)
+        self.convert_btn = ctk.CTkButton(fr2, anchor="center", text="Convert to SD WAV (8-bit Mono)", command=self._convert)
         self.convert_btn.pack(side="left")
         self.info_label = ctk.CTkLabel(fr2, text="Supported: WAV, MP3, FLAC, OGG, M4A, AAC, WMA, AIFF, ALAC", text_color="gray60")
         self.info_label.pack(side="left", padx=15)
@@ -267,7 +268,7 @@ class SoundControlApp(ctk.CTk):
         self.stream_widgets.append((wr_file, {"fill": "x", "padx": 30, "pady": 5}))
         self.stream_entry = ctk.CTkEntry(wr_file, textvariable=self.stream_file, placeholder_text="Select a converted _8bit.wav to stream...", font=("Consolas", 12))
         self.stream_entry.pack(side="left", fill="x", expand=True)
-        self.stream_browse_btn = ctk.CTkButton(wr_file, text="Browse", width=80, command=self._stream_browse)
+        self.stream_browse_btn = ctk.CTkButton(wr_file, anchor="center", text="Browse", width=80, command=self._stream_browse)
         self.stream_browse_btn.pack(side="left", padx=(10, 0))
 
         w3 = ctk.CTkLabel(self, text="  3. System Logs  ", font=ctk.CTkFont(size=16, weight="bold"))
@@ -307,7 +308,7 @@ class SoundControlApp(ctk.CTk):
             self.remote_widgets.append((type_lbl, {"relx": 0.33, "rely": base_y + 0.04}))
             type_var = ctk.StringVar(value="Sine")
             types = ["Sine", "Square", "Triangle", "Sawtooth", "Noise", "Kick", "Snare", "HiHat", "Crash", "Tom", "Clap", "Cowbell", "Ride", "Woodblk", "Bongo", "Conga", "Tambor", "Shaker", "Laser", "Bell", "RimSh", "FlrTom", "Guiro", "Maracs", "808K", "808Cl", "Timbal", "Agogo", "TriHit", "FMBel", "Siren", "ZapDn", "Metal", "PwrK", "Buzz"]
-            type_cb = ctk.CTkOptionMenu(self, variable=type_var, values=types, command=lambda val, idx=i: self._send_cmd(f"SET_CH_TYPE:{idx}:{types.index(val)}"))
+            type_cb = ctk.CTkOptionMenu(self, anchor="center", variable=type_var, values=types, command=lambda val, idx=i: self._send_cmd(f"SET_CH_TYPE:{idx}:{types.index(val)}"))
             self.remote_widgets.append((type_cb, {"relx": 0.38, "rely": base_y + 0.04, "relwidth": 0.19}))
             
             # Row 2: Frq Slider, Enable Button, Tempo Button
@@ -317,15 +318,15 @@ class SoundControlApp(ctk.CTk):
             freq_sl = ctk.CTkSlider(self, variable=freq_var, from_=20, to=8000, command=lambda val, idx=i: self._send_cmd(f"SET_CH_FREQ:{idx}:{int(val)}"))
             self.remote_widgets.append((freq_sl, {"relx": 0.06, "rely": base_y + 0.09, "relwidth": 0.25}))
             
-            en_btn = ctk.CTkButton(self, text="Enable", fg_color="#2B7A0B", hover_color="#1E5C06", command=lambda idx=i: self._toggle_en(idx))
-            self.remote_widgets.append((en_btn, {"relx": 0.33, "rely": base_y + 0.09, "relwidth": 0.08}))
+            en_btn = ctk.CTkButton(self, anchor="center", text="EN", fg_color="#444444", hover_color="#666666", command=lambda idx=i: self._toggle_en(idx))
+            self.remote_widgets.append((en_btn, {"relx": 0.33, "rely": base_y + 0.09, "relwidth": 0.05}))
             
             sync_var = ctk.IntVar(value=0)
-            sync_btn = ctk.CTkButton(self, text="Sync", fg_color="#444444", hover_color="#666666", command=lambda idx=i: self._toggle_sync(idx))
-            self.remote_widgets.append((sync_btn, {"relx": 0.42, "rely": base_y + 0.09, "relwidth": 0.06}))
+            sync_btn = ctk.CTkButton(self, anchor="center", text="Sync", fg_color="#444444", hover_color="#666666", command=lambda idx=i: self._toggle_sync(idx))
+            self.remote_widgets.append((sync_btn, {"relx": 0.39, "rely": base_y + 0.09, "relwidth": 0.09}))
 
             tempo_var = ctk.IntVar(value=0)
-            tempo_btn = ctk.CTkButton(self, text="Tmp: OFF", fg_color="#444444", hover_color="#666666", command=lambda idx=i: self._cycle_tempo(idx))
+            tempo_btn = ctk.CTkButton(self, anchor="center", text="T:OFF", fg_color="#444444", hover_color="#666666", command=lambda idx=i: self._cycle_tempo(idx))
             self.remote_widgets.append((tempo_btn, {"relx": 0.49, "rely": base_y + 0.09, "relwidth": 0.08}))
             
             self.ch_vars.append({'en': en_var, 'type': type_var, 'vol': vol_var, 'freq': freq_var, 'en_btn': en_btn, 'sync_var': sync_var, 'sync_btn': sync_btn, 'tempo_var': tempo_var, 'tempo_btn': tempo_btn})
@@ -337,10 +338,10 @@ class SoundControlApp(ctk.CTk):
         
         s_theme_lbl = ctk.CTkLabel(self, text="Theme:", anchor="w")
         self.remote_widgets.append((s_theme_lbl, {"relx": 0.58, "rely": base_s + 0.05}))
-        s_theme_cb = ctk.CTkOptionMenu(self, variable=self.esp_theme_name, values=list(THEMES.keys()), command=self._set_esp_theme)
+        s_theme_cb = ctk.CTkOptionMenu(self, anchor="center", variable=self.esp_theme_name, values=list(THEMES.keys()), command=self._set_esp_theme)
         self.remote_widgets.append((s_theme_cb, {"relx": 0.65, "rely": base_s + 0.05, "relwidth": 0.30}))
         
-        s_rst_btn = ctk.CTkButton(self, text="Reset", fg_color="#B22222", hover_color="#8B0000", command=self._confirm_reset)
+        s_rst_btn = ctk.CTkButton(self, anchor="center", text="Reset", fg_color="#B22222", hover_color="#8B0000", command=self._confirm_reset)
         self.remote_widgets.append((s_rst_btn, {"relx": 0.65, "rely": base_s + 0.10, "relwidth": 0.30}))
 
         s_wifi_lbl = ctk.CTkLabel(self, text="WiFi:", anchor="w")
@@ -360,7 +361,7 @@ class SoundControlApp(ctk.CTk):
         self.remote_widgets.append((m_lbl, {"relx": 0.58, "rely": base_m}))
         
         self.master_en = ctk.IntVar(value=1)
-        m_cb = ctk.CTkButton(self, text="EN", width=40, fg_color="#2B7A0B", command=lambda: self._toggle_master_en())
+        m_cb = ctk.CTkButton(self, anchor="center", text="EN", width=40, fg_color="#444444", hover_color="#666666", command=lambda: self._toggle_master_en())
         self.remote_widgets.append((m_cb, {"relx": 0.58, "rely": base_m + 0.04, "relwidth": 0.08}))
         self.master_en_btn = m_cb
         
@@ -386,24 +387,24 @@ class SoundControlApp(ctk.CTk):
         self.media_listbox.bind("<<ListboxSelect>>", self._on_media_select)
         
         # Player Buttons (Ply, Pau, Stp, SD)
-        btn_play = ctk.CTkButton(self, text="Ply", command=self._remote_play)
+        btn_play = ctk.CTkButton(self, anchor="center", text="Ply", command=self._remote_play)
         self.remote_widgets.append((btn_play, {"relx": 0.21, "rely": base_mp + 0.05, "relwidth": 0.05}))
-        self.btn_pause = ctk.CTkButton(self, text="Pau", command=self._remote_pause)
+        self.btn_pause = ctk.CTkButton(self, anchor="center", text="Pau", command=self._remote_pause)
         self.remote_widgets.append((self.btn_pause, {"relx": 0.27, "rely": base_mp + 0.05, "relwidth": 0.05}))
-        btn_stop = ctk.CTkButton(self, text="Stp", command=self._remote_stop)
+        btn_stop = ctk.CTkButton(self, anchor="center", text="Stp", command=self._remote_stop)
         self.remote_widgets.append((btn_stop, {"relx": 0.33, "rely": base_mp + 0.05, "relwidth": 0.05}))
         
         self.media_src_var = ctk.IntVar(value=0)
         src_lbl = ctk.CTkLabel(self, text="Src", font=("Consolas", 12, "bold"))
         self.remote_widgets.append((src_lbl, {"relx": 0.395, "rely": base_mp}))
-        btn_src = ctk.CTkButton(self, text="SD", command=self._toggle_media_src)
+        btn_src = ctk.CTkButton(self, anchor="center", text="SD", command=self._toggle_media_src)
         self.remote_widgets.append((btn_src, {"relx": 0.39, "rely": base_mp + 0.05, "relwidth": 0.045}))
         self.btn_src = btn_src
         
         agc_lbl = ctk.CTkLabel(self, text="AGC", font=("Consolas", 12, "bold"))
         self.remote_widgets.append((agc_lbl, {"relx": 0.445, "rely": base_mp}))
         self.agc_var = ctk.IntVar(value=0)
-        self.agc_btn = ctk.CTkButton(self, text="Fix", fg_color="#444444", command=self._toggle_agc)
+        self.agc_btn = ctk.CTkButton(self, anchor="center", text="Fix", command=self._toggle_agc)
         self.remote_widgets.append((self.agc_btn, {"relx": 0.44, "rely": base_mp + 0.05, "relwidth": 0.045}))
 
         # Bst and Ready label
@@ -433,7 +434,7 @@ class SoundControlApp(ctk.CTk):
 
         fx_names = ["None", "Echo", "Revrb", "Dist", "Fuzz", "Trem", "BitC", "Decim", "Chor", "Flang", "Wah", "Ring", "Sub", "OctF", "Vibr", "Tele", "Slap", "Gate", "Phas", "Robot", "PtSh", "LoFi", "Tape", "Stut", "RvEch", "S&H", "Comb", "Formt", "Shmmr", "Radio", "WahF"]
         self.fx_var = ctk.StringVar(value="None")
-        fx_cb = ctk.CTkOptionMenu(self, variable=self.fx_var, values=fx_names, command=lambda val: self._send_cmd(f"SET_FX_TYPE:{fx_names.index(val)}"))
+        fx_cb = ctk.CTkOptionMenu(self, anchor="center", variable=self.fx_var, values=fx_names, command=lambda val: self._send_cmd(f"SET_FX_TYPE:{fx_names.index(val)}"))
         self.remote_widgets.append((fx_cb, {"relx": 0.58, "rely": base_mp + 0.05, "relwidth": 0.12}))
 
         # SFX2 Row
@@ -442,15 +443,15 @@ class SoundControlApp(ctk.CTk):
         self.remote_widgets.append((fx_en2, {"relx": 0.51, "rely": base_mp + 0.10, "relwidth": 0.07}))
 
         self.fx_var2 = ctk.StringVar(value="None")
-        fx_cb2 = ctk.CTkOptionMenu(self, variable=self.fx_var2, values=fx_names, command=lambda val: self._send_cmd(f"SET_FX_TYPE2:{fx_names.index(val)}"))
+        fx_cb2 = ctk.CTkOptionMenu(self, anchor="center", variable=self.fx_var2, values=fx_names, command=lambda val: self._send_cmd(f"SET_FX_TYPE2:{fx_names.index(val)}"))
         self.remote_widgets.append((fx_cb2, {"relx": 0.58, "rely": base_mp + 0.10, "relwidth": 0.12}))
 
         # Overdrive & Speed buttons (side by side)
         self.od_en = 0
         self.sp_val = 1.0
-        self.od_btn = ctk.CTkButton(self, text="OD: OFF", fg_color="#444444", command=self._toggle_overdrive)
+        self.od_btn = ctk.CTkButton(self, anchor="center", text="OD: OFF", command=self._toggle_overdrive)
         self.remote_widgets.append((self.od_btn, {"relx": 0.60, "rely": base_mp + 0.16, "relwidth": 0.10}))
-        self.sp_btn = ctk.CTkButton(self, text="Spd: 1x", fg_color="#444444", command=self._toggle_speed)
+        self.sp_btn = ctk.CTkButton(self, anchor="center", text="Spd: 1x", fg_color="#444444", command=self._toggle_speed)
         self.remote_widgets.append((self.sp_btn, {"relx": 0.51, "rely": base_mp + 0.16, "relwidth": 0.09}))
 
         # EQ Sliders (L, LM, M, HM, H)
@@ -481,7 +482,7 @@ class SoundControlApp(ctk.CTk):
     def _toggle_master_en(self):
         nv = 0 if self.master_en.get() else 1
         self.master_en.set(nv)
-        self.master_en_btn.configure(text="EN" if nv else "DIS", fg_color="#2B7A0B" if nv else "#B22222", hover_color="#1E5C06" if nv else "#8B0000")
+        self.master_en_btn.configure(text="EN" if nv else "DIS")
         self._send_cmd(f"SET_MASTER_EN:{nv}")
 
     def _on_media_select(self, event):
@@ -553,7 +554,10 @@ class SoundControlApp(ctk.CTk):
             elif vu < 80: self.remote_vu.configure(progress_color="#FFFF00")
             else: self.remote_vu.configure(progress_color="#FF0000")
         elif parts[1] == "PROG":
+            self._prog_updating = True
             self.prog_level.set(int(parts[2]) / 100.0)
+            self._prog_updating = False
+        elif parts[1] == "SEEK":
             self.seek_req = int(parts[2])
         elif parts[1] == "STATE":
             pass
@@ -567,10 +571,13 @@ class SoundControlApp(ctk.CTk):
         elif parts[1] == "MEDIA_STATE":
             state = int(parts[2])
             self.media_state = state
-            states = ["Stopped", "Playing", "Paused"]
+            if self.media_src_var.get() == 1:
+                states = ["Ready", "Streaming", "Paused"]
+            else:
+                states = ["Ready", "Playing", "Paused"]
             self.media_state_lbl.configure(text=states[state])
             if hasattr(self, 'btn_pause'):
-                self.btn_pause.configure(text="Resume" if state == 2 else "Pause")
+                self.btn_pause.configure(text="Res" if state == 2 else "Pau")
             if self.media_src_var.get() == 1:
                 if state == 1 and not self.streaming:
                     self._stream()
@@ -593,7 +600,7 @@ class SoundControlApp(ctk.CTk):
             nv = int(parts[3])
             self.ch_vars[idx]['en'].set(nv)
             btn = self.ch_vars[idx]['en_btn']
-            btn.configure(text="Disable" if nv else "Enable", fg_color="#B22222" if nv else "#2B7A0B", hover_color="#8B0000" if nv else "#1E5C06")
+            btn.configure(text="DIS" if nv else "EN")
         elif parts[1] == "CH_TEMPO":
             idx = int(parts[2])
             nv = int(parts[3])
@@ -605,7 +612,7 @@ class SoundControlApp(ctk.CTk):
             nv = int(parts[3])
             self.ch_vars[idx]['sync_var'].set(nv)
             t = THEMES[self.theme_name.get()]
-            self.ch_vars[idx]['sync_btn'].configure(fg_color=t["accent"] if nv else "#444444")
+            self.ch_vars[idx]['sync_btn'].configure(text="Synced" if nv else "Sync", fg_color=t["accent"] if nv else "#444444")
         elif parts[1].startswith("EQ_"):
             band = int(parts[1][3:])
             val = int(parts[2])
@@ -632,11 +639,11 @@ class SoundControlApp(ctk.CTk):
             nv = int(parts[2])
             self.master_en.set(nv)
             if hasattr(self, 'master_en_btn'):
-                self.master_en_btn.configure(text="EN" if nv else "DIS", fg_color="#2B7A0B" if nv else "#B22222", hover_color="#1E5C06" if nv else "#8B0000")
+                self.master_en_btn.configure(text="EN" if nv else "DIS")
         elif parts[1] == "OVERDRIVE":
             self.od_en = int(parts[2])
             if hasattr(self, 'od_btn'):
-                self.od_btn.configure(text="OD: ON" if self.od_en else "OD: OFF", fg_color="#FF8000" if self.od_en else "#444444")
+                self.od_btn.configure(text="OD: ON" if self.od_en else "OD: OFF", fg_color="#444444")
         elif parts[1] == "SPEED":
             self.sp_val = int(parts[2]) / 100.0
             if hasattr(self, 'sp_btn'):
@@ -645,7 +652,7 @@ class SoundControlApp(ctk.CTk):
         elif parts[1] == "AGC_EN":
             val = int(parts[2])
             self.agc_var.set(val)
-            self.agc_btn.configure(fg_color="#D16D19" if val else "#444444")
+            self.agc_btn.configure(fg_color="#444444", text="Fxd" if val else "Fix")
         elif parts[1] == "FX_TYPE2":
             idx = int(parts[2])
             fx_names = ["None", "Echo", "Revrb", "Dist", "Fuzz", "Trem", "BitC", "Decim", "Chor", "Flang", "Wah", "Ring", "Sub", "OctF", "Vibr", "Tele", "Slap", "Gate", "Phas", "Robot", "PtSh", "LoFi", "Tape", "Stut", "RvEch", "S&H", "Comb", "Formt", "Shmmr", "Radio", "WahF"]
@@ -835,7 +842,14 @@ class SoundControlApp(ctk.CTk):
     def _remote_stop(self):
         self._send_cmd("MEDIA_STOP")
 
+    def _set_prog_silent(self, val):
+        self._prog_updating = True
+        self.prog_level.set(val)
+        self._prog_updating = False
+
     def _remote_seek(self, val):
+        if self._prog_updating:
+            return
         pct = int(val * 100)
         self._send_cmd(f"MEDIA_SEEK:{pct}")
         if self.media_src_var.get() == 1:
@@ -844,7 +858,7 @@ class SoundControlApp(ctk.CTk):
     def _toggle_agc(self):
         val = 1 if self.agc_var.get() == 0 else 0
         self.agc_var.set(val)
-        self.agc_btn.configure(fg_color="#D16D19" if val else "#444444")
+        self.agc_btn.configure(fg_color="#444444", text="Fxd" if val else "Fix")
         self._send_cmd(f"SET_AGC:{val}")
 
     def _stream(self):
@@ -855,6 +869,8 @@ class SoundControlApp(ctk.CTk):
         if not f or not os.path.exists(f):
             self._send_cmd("MEDIA_STOP")
             return
+        if not self.ctrl_connected:
+            self._toggle_control()
         self.streaming = True
         self.media_state = 1
         self.seek_req = -1
@@ -923,8 +939,11 @@ class SoundControlApp(ctk.CTk):
                         actual_frames = len(data) // bytes_per_frame
                         sent_frames += actual_frames
                         progress = min(1.0, sent_frames / total_frames)
-                        self.after(0, self.prog_level.set, progress)
-                        
+                        self.after(0, self.remote_pb.set, progress)
+                        pct = int(progress * 100)
+                        if getattr(self, 'last_sent_pct', -1) != pct:
+                            self.last_sent_pct = pct
+                            self.after(0, self._send_cmd, f"SET_PROG:{pct}")
                         # Rate limiting: sleep to match real-time playback
                         # Send slightly faster (0.85x) to keep ESP32 buffer fed
                         elapsed = time.monotonic() - t0

@@ -391,17 +391,23 @@ pip install customtkinter
 
 Here are the screenshots of the Sound Center running on the ESP32 and the Sound Control (Python Client) on PC:
 
-![ESP32 VGA GUI](Screenshots/Sound_Center.png)
-<br>
-*Sound Center: Interactive Retro GUI running directly on the ESP32 via FabGL VGA Output*
+<p align="center">
+  <img src="Screenshots/Sound_Center.png" width="800" />
+  <br>
+  <em>Sound Center: Interactive Retro GUI running directly on the ESP32 via FabGL VGA Output</em>
+</p>
 
-![Python Stream Client Page 1](Screenshots/Sound_Control_GUI_PAGE_1.jpeg)
-<br>
-*Sound Control: Python 8-Bit Converter, Stream and Control Client (Page 1)*
+<p align="center">
+  <img src="Screenshots/Sound_Control_GUI_PAGE_1.jpeg" width="800" />
+  <br>
+  <em>Sound Control: Python 8-Bit Converter, Stream and Control Client (Page 1)</em>
+</p>
 
-![Python Stream Client Page 2](Screenshots/Sound_Control_GUI_PAGE_2.jpeg)
-<br>
-*Sound Control: Python 8-Bit Converter, Stream and Control Client (Page 2)*
+<p align="center">
+  <img src="Screenshots/Sound_Control_GUI_PAGE_2.jpeg" width="800" />
+  <br>
+  <em>Sound Control: Python 8-Bit Converter, Stream and Control Client (Page 2)</em>
+</p>
 
 ---
 

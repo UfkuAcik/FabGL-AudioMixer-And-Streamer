@@ -17,7 +17,8 @@
 5. [Python Client Requirements & Installation (CRITICAL STEPS)](#python-requirements)
 6. [Usage & Controls](#usage)
 7. [Screenshots](#screenshots)
-8. [Notes & License](#notes)
+8. [Future Developments](#future-developments)
+9. [Notes & License](#notes)
 
 ---
 
@@ -408,6 +409,16 @@ Here are the screenshots of the Sound Center running on the ESP32 and the Sound 
   <br>
   <em>Sound Control: Python 8-Bit Converter, Stream and Control Client (Page 2)</em>
 </p>
+
+---
+
+<a name="future-developments"></a>
+## 🚀 Future Developments
+
+* Remastering the algorithms in the DSP block to ensure full academic compliance and optimizing the related functions to the highest possible degree.
+* The ability to import short external audio files (1-2 seconds) from an SD card into the synthesizers (signal generators) and synchronize them to the tempo.
+* Real-time recording from the master output to the SD card during runtime.
+* Improvements to make it impossible for the master audio output to clip/distort, even as a result of heavy effects and boosting.
 
 ---
 

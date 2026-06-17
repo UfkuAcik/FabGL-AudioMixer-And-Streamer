@@ -427,6 +427,6 @@ Here are the screenshots of the Sound Center running on the ESP32 and the Sound 
 
 💡 **Tip:** To easily extract and download audio files from web pages for use with the Sound Center, I recommend **[JDownloader](https://jdownloader.org/)**—a free and open-source media downloader.
 
-📜 **License:** MIT License. Feel free to fork, modify, and use it as you wish.
+📜 **License:** GNU General Public License v3.0 (GPL-3.0). This project statically links to the FabGL library, thus inheriting its GPLv3 license terms. Feel free to fork, modify, and use it in accordance with the GPL-3.0 guidelines.
 
 🤖 *This project was coded and documented with an emphasis on code architecture and optimization by the advanced Antigravity AI agent developed by the Google DeepMind team.*
